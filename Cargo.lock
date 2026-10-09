@@ -1895,6 +1895,7 @@ dependencies = [
  "ureq",
  "webbrowser",
  "windows-native-keyring-store",
+ "zbus",
  "zbus-secret-service-keyring-store",
 ]
 
