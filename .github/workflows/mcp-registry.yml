@@ -1,0 +1,37 @@
+# Publish server.json to the official MCP registry on a version tag, after npm
+# serves the version. The namespace io.github.munhq is proven with GitHub Actions
+# OIDC, so no secret is needed.
+name: mcp-registry
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_linux_amd64.tar.gz | tar -xz mcp-publisher
+      - name: Wait for the npm version
+        run: |
+          VERSION=$(node -p "require('./server.json').version")
+          for i in $(seq 1 60); do
+            npm view "@munhq/sealkeep@$VERSION" version >/dev/null 2>&1 && { echo "npm has $VERSION"; exit 0; }
+            sleep 20
+          done
+          echo "::error::npm did not serve $VERSION in 20 minutes"; exit 1
+      - name: Login (GitHub Actions OIDC)
+        run: ./mcp-publisher login github-oidc
+      - name: Publish
+        run: ./mcp-publisher publish

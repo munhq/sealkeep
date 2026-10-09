@@ -1,0 +1,23 @@
+{
+  "$schema": "https://glama.ai/mcp/schemas/server.json",
+  "maintainers": [
+    "darkkraft"
+  ],
+  "name": "sealkeep",
+  "description": "Give AI agents the use of your secrets without the values. An agent asks for a secret by name; sealkeep puts the value into the environment of one command and replaces it with [sealkeep:NAME] in all output. Secrets live in the OS keyring, HashiCorp Vault or OpenBao, AWS Secrets Manager, Google Secret Manager, Azure Key Vault, 1Password or Bitwarden. Tools: list_secrets, run_with_secrets, store_status; no tool returns a value.",
+  "category": "security",
+  "tags": [
+    "mcp",
+    "secrets",
+    "security",
+    "keyring",
+    "vault",
+    "1password",
+    "developer-tools"
+  ],
+  "license": "MIT",
+  "repository": "https://github.com/munhq/sealkeep",
+  "runtime": "node",
+  "entryPoint": "npx -y @munhq/sealkeep",
+  "environmentVariables": []
+}

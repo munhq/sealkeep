@@ -264,4 +264,4 @@ The `test-store` feature replaces the OS keyring with a file, for the tests only
 
 ## Licence
 
-MIT or Apache-2.0, at your choice.
+MIT

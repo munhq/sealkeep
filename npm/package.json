@@ -1,0 +1,41 @@
+{
+  "name": "@munhq/sealkeep",
+  "version": "0.3.0",
+  "mcpName": "io.github.munhq/sealkeep",
+  "description": "Give AI agents the use of your secrets without the values: named secrets in the OS keyring, Vault, AWS, Google, Azure, 1Password or Bitwarden, injected into a command and redacted from its output. MCP server and CLI.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "mcp-server",
+    "secrets",
+    "keyring",
+    "vault",
+    "1password",
+    "ai-agents",
+    "claude"
+  ],
+  "homepage": "https://github.com/munhq/sealkeep",
+  "bugs": "https://github.com/munhq/sealkeep/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/munhq/sealkeep.git"
+  },
+  "license": "MIT",
+  "bin": {
+    "sealkeep": "bin/sealkeep.js"
+  },
+  "scripts": {
+    "postinstall": "node bin/postinstall.js",
+    "test": "node bin/selftest.js"
+  },
+  "files": [
+    "bin/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
