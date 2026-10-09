@@ -1,0 +1,27 @@
+# Smithery: how to start the server. The listing itself is made through the
+# Smithery API (see .github/workflows/smithery.yml in munhq/codeindex for the flow).
+#
+# sealkeep reads secrets from the OS keyring and the CLIs of the user's machine, so
+# it runs where the user runs, over stdio. There is no hosted version.
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties:
+      config:
+        type: string
+        title: Config file
+        description: >-
+          Path of the sealkeep config file. Leave empty for the default
+          (~/.config/sealkeep/config.toml), or for the OS keyring alone.
+        default: ""
+    required: []
+  commandFunction: |-
+    (config) => ({
+      command: 'npx',
+      args: ['-y', '@munhq/sealkeep'],
+      env: config.config ? { SEALKEEP_CONFIG: config.config } : {},
+    })
+
+build:
+  dockerfile: null

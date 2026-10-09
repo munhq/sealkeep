@@ -1,0 +1,31 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.munhq/sealkeep",
+  "title": "sealkeep",
+  "description": "Let AI agents use secrets without seeing them: inject into a command, redact the output.",
+  "repository": {
+    "url": "https://github.com/munhq/sealkeep",
+    "source": "github"
+  },
+  "version": "0.3.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@munhq/sealkeep",
+      "version": "0.3.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "SEALKEEP_CONFIG",
+          "description": "Path of the config file (stores, aliases, guard rules). Default: the config folder of the OS, for example ~/.config/sealkeep/config.toml. With no file, sealkeep uses the OS keyring.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        }
+      ],
+      "runtimeHint": "npx"
+    }
+  ]
+}
