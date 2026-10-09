@@ -17,9 +17,6 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 /// text in the output, and such a value is not a credential.
 pub const MIN_REDACT_LEN: usize = 4;
 
-/// A value this long is redacted whatever its key is.
-const ALWAYS_REDACT_LEN: usize = 16;
-
 const SECRET_WORDS: &[&str] = &[
     "KEY",
     "TOKEN",
@@ -41,10 +38,27 @@ const SECRET_WORDS: &[&str] = &[
     "BEARER",
 ];
 
+/// Words of keys that name configuration: their values stay readable in the output.
+const CONFIG_WORDS: &[&str] = &[
+    "PORT", "HOST", "URL", "URI", "ENDPOINT", "DOMAIN", "ORIGIN", "ENV", "LEVEL", "MODE", "NAME",
+    "USER", "USERNAME", "EMAIL", "ID", "REGION", "ZONE", "MODEL", "PROVIDER", "ENABLED", "PATH",
+    "DIR", "PREFIX", "TIMEOUT", "VERSION", "DB", "DATABASE", "SCHEMA", "LOCALE", "LANG", "TZ",
+];
+
 /// Whether a key names a secret.
 pub fn secret_key_name(key: &str) -> bool {
+    if crate::dotenv::is_login_key(key) {
+        return true;
+    }
     let k = key.to_ascii_uppercase();
     SECRET_WORDS.iter().any(|w| k.contains(w))
+}
+
+/// Whether a key names configuration: one of its `_` parts is a config word, and no
+/// part of it names a secret.
+pub fn config_key_name(key: &str) -> bool {
+    let k = key.to_ascii_uppercase();
+    !secret_key_name(key) && k.split(['_', '-', '.']).any(|p| CONFIG_WORDS.contains(&p))
 }
 
 /// `scheme://user:password@host`
@@ -55,12 +69,28 @@ pub fn url_with_password(value: &str) -> bool {
         .is_some_and(|(userinfo, _)| userinfo.contains(':'))
 }
 
-/// Whether a value is redacted. A config value such as `PORT=3000` or
-/// `NODE_ENV=production` stays readable in the output.
+/// Whether a value looks like configuration: a URL with no password and no credential
+/// in its query, or a short word, number, host or address (15 characters or less).
+pub fn config_value(value: &str) -> bool {
+    if value.contains("://") {
+        let v = value.to_ascii_lowercase();
+        return !url_with_password(value)
+            && !["token=", "key=", "secret=", "password=", "sig="]
+                .iter()
+                .any(|q| v.contains(q));
+    }
+    value.len() <= 15
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._:/@-".contains(c))
+}
+
+/// Whether a value is redacted: every value of 4 characters or more, except the value
+/// of a config key that also looks like config (`PORT=3000`, `NODE_ENV=production`,
+/// `REDIS_URL=redis://cache:6379`).
 pub fn should_redact(name: &str, value: &str) -> bool {
     let key = crate::names::key_of(name);
-    value.len() >= MIN_REDACT_LEN
-        && (secret_key_name(key) || url_with_password(value) || value.len() >= ALWAYS_REDACT_LEN)
+    value.len() >= MIN_REDACT_LEN && !(config_key_name(key) && config_value(value))
 }
 
 #[derive(Debug, Clone)]
@@ -261,10 +291,22 @@ mod tests {
             ("app/dev/NODE_ENV", "production"),
             ("app/dev/DATABASE_URL", "postgres://u:pw@h/db"),
             ("app/dev/SIGNER", "0123456789abcdef0123"),
+            ("app/dev/SMTP_SUPPORT", "short-pw"),
+            ("app/dev/REDIS_URL", "redis://cache:6379"),
+            ("app/dev/BACKUP_URL", "sk-test-0123456789abcdef"),
+            ("app/dev/HOOK_URL", "https://h.example/x?token=abcd"),
         ]);
         assert_eq!(
-            r.redact_str("3000 production postgres://u:pw@h/db 0123456789abcdef0123"),
-            "3000 production [sealkeep:app/dev/DATABASE_URL] [sealkeep:app/dev/SIGNER]"
+            r.redact_str("sk-test-0123456789abcdef"),
+            "[sealkeep:app/dev/BACKUP_URL]"
+        );
+        assert_eq!(
+            r.redact_str("https://h.example/x?token=abcd"),
+            "[sealkeep:app/dev/HOOK_URL]"
+        );
+        assert_eq!(
+            r.redact_str("3000 production postgres://u:pw@h/db 0123456789abcdef0123 short-pw redis://cache:6379"),
+            "3000 production [sealkeep:app/dev/DATABASE_URL] [sealkeep:app/dev/SIGNER] [sealkeep:app/dev/SMTP_SUPPORT] redis://cache:6379"
         );
     }
 

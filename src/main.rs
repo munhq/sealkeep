@@ -538,9 +538,11 @@ fn scan_cmd(
         if let Some(e) = &f.error {
             println!("  (not read: {e})");
         }
-        if !f.bad_lines.is_empty() {
-            let l: Vec<String> = f.bad_lines.iter().map(|n| n.to_string()).collect();
-            println!("  (lines that do not parse, not shown: {})", l.join(", "));
+        for b in &f.bad_lines {
+            println!(
+                "  line {}: does not parse ({}); the text is not shown",
+                b.line, b.reason
+            );
         }
         for k in &f.keys {
             match k.group {

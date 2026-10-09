@@ -48,8 +48,14 @@ pub struct ImportArgs {
     pub dry_run: bool,
 }
 
-/// `stripe-secret.key` -> `STRIPE_SECRET_KEY`. `None` when no valid key results.
+/// `stripe-secret.key` -> `STRIPE_SECRET_KEY`. A login `no-reply@example.com` ->
+/// `NO_REPLY_AT_EXAMPLE_COM_PASSWORD`. `None` when no valid key results.
 pub fn key_name(raw: &str) -> Option<String> {
+    if crate::dotenv::is_login_key(raw) {
+        let base = key_name(&raw.replace('@', "_at_"))?;
+        let k = format!("{base}_PASSWORD");
+        return names::valid_key(&k).then_some(k);
+    }
     let k: String = raw
         .trim()
         .chars()
@@ -127,8 +133,8 @@ fn entries(path: &Path, format: Format, folder: &str) -> Result<(Vec<Entry>, Vec
     match format {
         Format::Dotenv => {
             let parsed = crate::dotenv::parse_file(path)?;
-            for n in parsed.bad_lines {
-                skipped.push(format!("line {n} (does not parse)"));
+            for (n, reason) in parsed.bad_lines {
+                skipped.push(format!("line {n} ({reason})"));
             }
             for (k, v) in parsed.entries {
                 match key_name(&k) {
@@ -286,6 +292,10 @@ mod tests {
             Some("AWS_ACCESS_KEY")
         );
         assert_eq!(key_name("1abc"), None);
+        assert_eq!(
+            key_name("no-reply@example.com").as_deref(),
+            Some("NO_REPLY_AT_EXAMPLE_COM_PASSWORD")
+        );
         assert_eq!(key_name("a$b"), None);
     }
 

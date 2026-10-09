@@ -45,11 +45,17 @@ pub struct KeyReport {
 }
 
 #[derive(Debug, Serialize)]
+pub struct BadLine {
+    pub line: usize,
+    pub reason: &'static str,
+}
+
+#[derive(Debug, Serialize)]
 pub struct FileReport {
     pub path: String,
-    /// The numbers of the lines that do not parse. Their text is never shown.
+    /// The lines that do not parse, by number and reason. Their text is never shown.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub bad_lines: Vec<usize>,
+    pub bad_lines: Vec<BadLine>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub keys: Vec<KeyReport>,
@@ -73,10 +79,10 @@ pub struct Options {
 fn class(key: &str, value: &str) -> &'static str {
     if value.is_empty() {
         "empty"
-    } else if crate::redact::secret_key_name(key) || crate::redact::url_with_password(value) {
-        "secret"
-    } else {
+    } else if crate::redact::config_key_name(key) && crate::redact::config_value(value) {
         "config"
+    } else {
+        "secret"
     }
 }
 
@@ -190,7 +196,11 @@ pub fn scan(roots: &[PathBuf], opts: &Options) -> Result<Report> {
         };
         match crate::dotenv::parse_file(path) {
             Ok(parsed) => {
-                rep.bad_lines = parsed.bad_lines;
+                rep.bad_lines = parsed
+                    .bad_lines
+                    .into_iter()
+                    .map(|(line, reason)| BadLine { line, reason })
+                    .collect();
                 for (key, value) in parsed.entries {
                     let c = class(&key, &value);
                     // Only secrets are grouped: config values such as `localhost` repeat
@@ -243,6 +253,7 @@ mod tests {
         assert_eq!(class("STRIPE_SECRET_KEY", "sk_test_x"), "secret");
         assert_eq!(class("DATABASE_URL", "postgres://u:p@h/db"), "secret");
         assert_eq!(class("DATABASE_URL", "postgres://h/db"), "config");
+        assert_eq!(class("SMTP_SUPPORT", "pw"), "secret");
         assert_eq!(class("PORT", "3000"), "config");
         assert_eq!(class("API_KEY", ""), "empty");
     }
@@ -256,7 +267,7 @@ mod tests {
         std::fs::create_dir_all(&b).unwrap();
         std::fs::write(
             a.join(".env"),
-            "STRIPE_KEY=sk_same\nPORT=3000\nbad@line=pw-in-a-bad-line\n",
+            "STRIPE_KEY=sk_same\nPORT=3000\nbad line=pw-in-a-bad-line\n",
         )
         .unwrap();
         std::fs::write(
@@ -283,6 +294,6 @@ mod tests {
         assert!(!json.contains("sk_same"));
         assert!(!json.contains("3000"));
         assert!(!json.contains("pw-in-a-bad-line"));
-        assert!(json.contains("\"bad_lines\":[3]"), "{json}");
+        assert!(json.contains("\"line\":3"), "{json}");
     }
 }
