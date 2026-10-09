@@ -44,6 +44,9 @@ pub struct RunArgs {
     /// Folders: every secret in each folder goes into the variable named by its key, for example "personal/example-app/dev".
     #[serde(default)]
     pub folders: Vec<String>,
+    /// With folders: also the secrets in their subfolders.
+    #[serde(default)]
+    pub recursive: bool,
     /// Single secrets: NAME (the variable is its key), STORE:NAME, or VAR=NAME to choose the variable.
     #[serde(default)]
     pub secrets: Vec<String>,
@@ -135,7 +138,7 @@ impl Server {
             );
             let mut env: Vec<Binding> = Vec::new();
             for f in &args.folders {
-                for b in stores.folder_bindings(f.trim_end_matches('/'), None)? {
+                for b in stores.folder_bindings(f.trim_end_matches('/'), None, args.recursive)? {
                     env.retain(|x| x.var != b.var);
                     env.push(b);
                 }

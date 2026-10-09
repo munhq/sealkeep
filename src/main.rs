@@ -84,9 +84,12 @@ enum Cmd {
         after_help = "Examples:\n  sealkeep run shared/openrouter/API_KEY -- sh -c 'curl -H \"Authorization: Bearer $API_KEY\" https://openrouter.ai/api/v1/key'\n  sealkeep run --all personal/example-app/dev -- npm run dev\n  sealkeep run -e GITHUB_TOKEN=personal/github/PAT -- gh api user\n  sealkeep run --dotenv ADMIN_PASSWORD=personal/example-app/dev/ADMIN_PASSWORD -- npx @playwright/mcp@latest --secrets {dotenv}"
     )]
     Run {
-        /// Every secret in FOLDER and below, each in the variable named by its key.
+        /// Every secret in FOLDER, each in the variable named by its key.
         #[arg(long = "all", value_name = "FOLDER")]
         all: Vec<String>,
+        /// With --all: also the secrets in the subfolders.
+        #[arg(long)]
+        recursive: bool,
         /// Read --all folders from this store only.
         #[arg(long)]
         store: Option<String>,
@@ -289,12 +292,13 @@ fn dispatch(cmd: Cmd) -> Result<i32> {
         Cmd::Get { name, store } => get(&name, store.as_deref()),
         Cmd::Run {
             all,
+            recursive,
             store,
             env,
             dotenv,
             secrets,
             command,
-        } => run_cmd(all, store, env, dotenv, secrets, command),
+        } => run_cmd(all, recursive, store, env, dotenv, secrets, command),
         Cmd::Import(args) => import::run(args),
         Cmd::Scan {
             roots,
@@ -569,6 +573,7 @@ fn get(name: &str, store: Option<&str>) -> Result<i32> {
 
 fn run_cmd(
     all: Vec<String>,
+    recursive: bool,
     store: Option<String>,
     env: Vec<String>,
     dotenv: Vec<String>,
@@ -579,7 +584,7 @@ fn run_cmd(
     // Folders first, then single names, so a single name can replace one folder entry.
     let mut bindings: Vec<Binding> = Vec::new();
     for f in &all {
-        for b in stores.folder_bindings(f.trim_end_matches('/'), store.as_deref())? {
+        for b in stores.folder_bindings(f.trim_end_matches('/'), store.as_deref(), recursive)? {
             bindings.retain(|x| x.var != b.var);
             bindings.push(b);
         }

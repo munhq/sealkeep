@@ -154,9 +154,15 @@ impl Stores {
         (all, errors)
     }
 
-    /// One binding for each secret in `folder` and below, by the key of its name. Two
-    /// secrets with the same key are an error, because one variable cannot hold both.
-    pub fn folder_bindings(&self, folder: &str, store: Option<&str>) -> Result<Vec<Binding>> {
+    /// One binding for each secret in `folder` (and in its subfolders when `recursive`),
+    /// by the key of its name. Two secrets with the same key are an error, because one
+    /// variable cannot hold both.
+    pub fn folder_bindings(
+        &self,
+        folder: &str,
+        store: Option<&str>,
+        recursive: bool,
+    ) -> Result<Vec<Binding>> {
         names::check_prefix(folder)?;
         let (items, errors) = match store {
             Some(s) => (self.by_name(s)?.list()?, Vec::new()),
@@ -167,12 +173,19 @@ impl Stores {
         }
         let mut by_key: HashMap<String, String> = HashMap::new();
         let mut out = Vec::new();
-        for i in items.iter().filter(|i| names::under(&i.name, folder)) {
+        let wanted = |name: &str| {
+            if recursive {
+                names::under(name, folder)
+            } else {
+                names::folder_of(name) == folder
+            }
+        };
+        for i in items.iter().filter(|i| wanted(&i.name)) {
             let key = names::key_of(&i.name).to_string();
             match by_key.get(&key) {
                 Some(n) if n == &i.name => continue,
                 Some(n) => bail!(
-                    "`{n}` and `{}` both set {key}; name a deeper folder, or use -e for one of them",
+                    "`{n}` and `{}` both set {key}; name one folder, or use -e for one of them",
                     i.name
                 ),
                 None => {}
