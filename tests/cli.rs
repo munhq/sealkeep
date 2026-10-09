@@ -772,7 +772,7 @@ fn sync_to_vault_and_run_from_it() {
         .unwrap();
     assert!(
         String::from_utf8_lossy(&out.stderr)
-            .contains("Copied 0 secrets from local to vault; 2 were the same")
+            .contains("Copied 0 secrets from local to vault; 3 were the same")
     );
 
     let out = env
