@@ -854,7 +854,9 @@ fn unlock() -> Result<i32> {
             .output()
             .is_ok_and(|o| o.status.success())
     {
-        let pw = rpassword::prompt_password("Password of the login keyring: ")?;
+        let pw = rpassword::prompt_password(
+            "Password of the login keyring (a new keyring gets this password): ",
+        )?;
         store::keyring::unlock_gnome_keyring(&pw)?;
         if store::keyring::default_locked()? == Some(false) {
             eprintln!("The keyring is unlocked.");
