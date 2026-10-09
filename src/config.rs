@@ -44,6 +44,22 @@ pub struct Config {
     pub aliases: BTreeMap<String, String>,
     #[serde(default)]
     pub guard: GuardConfig,
+    /// SSH keys that `ssh-load` (and `unlock`) adds to an agent.
+    #[serde(default, rename = "ssh_key", skip_serializing_if = "Vec::is_empty")]
+    pub ssh_keys: Vec<SshKey>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SshKey {
+    /// The private key file. `~/` is the home folder.
+    pub path: String,
+    /// The secret that holds its passphrase. Absent for a key with no passphrase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passphrase: Option<String>,
+    /// The agent socket. Default: `$SSH_AUTH_SOCK`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +152,7 @@ impl Default for Config {
             }],
             aliases: BTreeMap::new(),
             guard: GuardConfig::default(),
+            ssh_keys: Vec::new(),
         }
     }
 }
@@ -222,6 +239,11 @@ impl Config {
                 if *auth == VaultAuth::Kubernetes && (role.is_none() || jwt_command.is_empty()) {
                     bail!("store `{n}`: Kubernetes auth needs `role` and `jwt_command`");
                 }
+            }
+        }
+        for k in &self.ssh_keys {
+            if let Some(p) = &k.passphrase {
+                names::check(p).with_context(|| format!("ssh_key `{}`", k.path))?;
             }
         }
         for (alias, target) in &self.aliases {

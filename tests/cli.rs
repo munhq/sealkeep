@@ -799,3 +799,80 @@ fn sync_to_vault_and_run_from_it() {
         .failure()
         .stderr(predicates::str::contains("permission denied"));
 }
+
+// ── SSH keys ────────────────────────────────────────────────────────────────
+
+#[test]
+fn ssh_load_adds_a_key_with_its_passphrase_and_askpass_answers_ssh_add_only() {
+    let env = Env::new();
+    let key = env.path("id_test");
+    let pass = "correct horse battery staple 42";
+    let ok = std::process::Command::new("ssh-keygen")
+        .args([
+            "-q",
+            "-t",
+            "ed25519",
+            "-N",
+            pass,
+            "-C",
+            "sealkeep-test",
+            "-f",
+        ])
+        .arg(&key)
+        .status()
+        .unwrap();
+    assert!(ok.success());
+    let sock = env.path("agent.sock");
+    let mut agent = std::process::Command::new("ssh-agent")
+        .args(["-D", "-a"])
+        .arg(&sock)
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    for _ in 0..50 {
+        if sock.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    env.set("personal/ssh/TEST_PASSPHRASE", pass);
+    env.cmd()
+        .args([
+            "ssh-add",
+            key.to_str().unwrap(),
+            "--passphrase",
+            "personal/ssh/TEST_PASSPHRASE",
+            "--agent",
+        ])
+        .arg(&sock)
+        .assert()
+        .success();
+    let out = env.cmd().arg("ssh-load").output().unwrap();
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{e}");
+    assert!(e.contains("added to"), "{e}");
+    let listed = std::process::Command::new("ssh-add")
+        .arg("-l")
+        .env("SSH_AUTH_SOCK", &sock)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("sealkeep-test"));
+
+    // A second run finds the key in the agent.
+    let out = env.cmd().arg("ssh-load").output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("already in the agent"));
+
+    // The askpass step does not answer a process that is not ssh-add.
+    let out = env
+        .cmd()
+        .env("SEALKEEP_ASKPASS_TOKEN", "a".repeat(48))
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(!stdout(&out).contains(pass));
+    assert!(!env.audit().contains(pass));
+
+    let _ = agent.kill();
+    let _ = agent.wait();
+}

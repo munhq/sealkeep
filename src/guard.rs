@@ -108,6 +108,11 @@ pub fn check_command(cmd: &str, cfg: &Config) -> Option<String> {
             return Some(r);
         }
 
+        if seg.contains("SEALKEEP_ASKPASS_TOKEN") {
+            return Some(format!(
+                "sealkeep guard: SEALKEEP_ASKPASS_TOKEN is for ssh-add only. {ADVICE}"
+            ));
+        }
         if prog == "sealkeep" && args.first() == Some(&"get") {
             return Some(format!(
                 "sealkeep guard: `sealkeep get` prints a secret value. {ADVICE}"
@@ -377,6 +382,8 @@ mod tests {
         assert!(denied("echo \"`sealkeep get X`\""));
         assert!(!denied("sealkeep run X -- curl https://example.com"));
         assert!(!denied("sealkeep list"));
+        assert!(denied("SEALKEEP_ASKPASS_TOKEN=ab sealkeep"));
+        assert!(denied("export SEALKEEP_ASKPASS_TOKEN=ab; sealkeep"));
     }
 
     #[test]
