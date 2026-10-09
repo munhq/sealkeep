@@ -16,7 +16,6 @@ anyhow = "1.0.104"
 base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 directories = "6.0.0"
-dotenvy = "0.15.7"
 keyring-core = "1.0.0"
 rmcp = { version = "3.5.1", features = ["server", "transport-io", "macros"] }
 rpassword = "7.5.4"
