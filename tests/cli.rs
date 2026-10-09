@@ -753,7 +753,10 @@ fn sync_to_vault_and_run_from_it() {
     let e = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{e}");
     assert!(e.contains("Copied 3 secrets"), "{e}");
-    assert!(e.contains("skipped BARE_KEY (Vault needs a folder)"), "{e}");
+    assert!(
+        e.contains("skipped BARE_KEY (the vault store needs a folder)"),
+        "{e}"
+    );
     assert!(!e.contains(SECRET));
     {
         let st = state.lock().unwrap();
@@ -919,4 +922,306 @@ fn ssh_load_adds_a_key_with_its_passphrase_and_askpass_answers_ssh_add_only() {
 
     let _ = agent.kill();
     let _ = agent.wait();
+}
+
+// ── Vendor stores, against a fake of each CLI ───────────────────────────────
+
+struct Fake {
+    path: String,
+    state: PathBuf,
+    argv: PathBuf,
+}
+
+fn fake_vendors(env: &Env) -> Fake {
+    let bin = env.path("fakebin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fakes/fakecli.py");
+    for name in ["aws", "gcloud", "az", "op", "bw"] {
+        std::os::unix::fs::symlink(&script, bin.join(name)).unwrap();
+    }
+    Fake {
+        path: format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        state: env.path("fake-state.json"),
+        argv: env.path("fake-argv.log"),
+    }
+}
+
+impl Fake {
+    fn apply(&self, cmd: &mut Command) {
+        cmd.env("PATH", &self.path)
+            .env("FAKE_STATE", &self.state)
+            .env("FAKE_ARGV_LOG", &self.argv)
+            .env("BW_SESSION", "test-session");
+    }
+}
+
+fn vendor_round_trip(kind_args: &[&str], store: &str) {
+    let env = Env::new();
+    let fake = fake_vendors(&env);
+    let run = |args: &[&str], stdin: Option<&str>| {
+        let mut c = env.cmd();
+        fake.apply(&mut c);
+        c.args(args);
+        if let Some(s) = stdin {
+            c.write_stdin(s.to_string());
+        }
+        c.output().unwrap()
+    };
+    let out = run(&[&["store"], kind_args].concat(), None);
+    assert!(out.status.success(), "{out:?}");
+
+    // `set` writes to the keyring and to the vendor store.
+    let out = run(
+        &[
+            "set",
+            "shared/stripe/test/SECRET_KEY",
+            "--stdin",
+            "-d",
+            "stripe test",
+        ],
+        Some(SECRET),
+    );
+    let e = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(e.contains(&format!("in local, {store}")), "{e}");
+    let out = run(
+        &["set", "shared/stripe/test/WEBHOOK_SECRET", "--stdin"],
+        Some("whsec-0123456789abcdef"),
+    );
+    assert!(out.status.success(), "{out:?}");
+
+    let out = run(&["list", "--store", store, "--json"], None);
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
+    let names: Vec<String> = v["secrets"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|i| i["name"].as_str().unwrap().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        names.contains(&"shared/stripe/test/SECRET_KEY".to_string()),
+        "{store}: {out:?}"
+    );
+    assert!(
+        names.contains(&"shared/stripe/test/WEBHOOK_SECRET".to_string()),
+        "{store}: {names:?}"
+    );
+
+    let out = run(
+        &[
+            "run",
+            &format!("{store}:shared/stripe/test/SECRET_KEY"),
+            "--",
+            "sh",
+            "-c",
+            "test \"$SECRET_KEY\" = \"$EXPECT\" && echo same",
+        ],
+        None,
+    );
+    let _ = out;
+    let mut c = env.cmd();
+    fake.apply(&mut c);
+    let out = c
+        .args([
+            "run",
+            &format!("{store}:shared/stripe/test/SECRET_KEY"),
+            "--",
+            "sh",
+            "-c",
+            "test \"$SECRET_KEY\" = \"$EXPECT\" && echo same",
+        ])
+        .env("EXPECT", SECRET)
+        .output()
+        .unwrap();
+    assert_eq!(stdout(&out).trim(), "same", "{store}: {out:?}");
+
+    // Replace a value, remove one, and set it again (Azure recovers the deleted secret).
+    let out = run(
+        &[
+            "set",
+            "shared/stripe/test/SECRET_KEY",
+            "--stdin",
+            "--store",
+            store,
+        ],
+        Some("sk-test-replaced-0123456789"),
+    );
+    assert!(out.status.success(), "{out:?}");
+    let out = run(
+        &["rm", "shared/stripe/test/WEBHOOK_SECRET", "--store", store],
+        None,
+    );
+    assert!(out.status.success(), "{out:?}");
+    let out = run(
+        &[
+            "set",
+            "shared/stripe/test/WEBHOOK_SECRET",
+            "--stdin",
+            "--store",
+            store,
+        ],
+        Some("whsec-again-0123456789"),
+    );
+    assert!(out.status.success(), "{store}: {out:?}");
+    let mut c = env.cmd();
+    fake.apply(&mut c);
+    let out = c
+        .args([
+            "run",
+            &format!("{store}:shared/stripe/test/WEBHOOK_SECRET"),
+            "--",
+            "sh",
+            "-c",
+            "test \"$WEBHOOK_SECRET\" = whsec-again-0123456789 && echo same",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(stdout(&out).trim(), "same", "{store}: {out:?}");
+
+    // `sync` from the keyring finds the vendor store up to date for the names it holds.
+    let out = run(
+        &[
+            "sync",
+            "--from",
+            "local",
+            "--to",
+            store,
+            "--folder",
+            "shared/stripe",
+        ],
+        None,
+    );
+    assert!(out.status.success(), "{out:?}");
+
+    // No value was ever in the arguments of a vendor command.
+    let log = std::fs::read_to_string(&fake.argv).unwrap();
+    for v in [
+        SECRET,
+        "whsec-0123456789abcdef",
+        "sk-test-replaced-0123456789",
+        "whsec-again-0123456789",
+    ] {
+        assert!(
+            !log.contains(v),
+            "{store}: a value is in the arguments:\n{log}"
+        );
+    }
+    assert!(log.lines().count() > 5, "{store}: {log}");
+}
+
+#[test]
+fn aws_store() {
+    vendor_round_trip(&["add-aws", "aws", "--region", "eu-west-1"], "aws");
+}
+
+#[test]
+fn gcp_store() {
+    vendor_round_trip(&["add-gcp", "gcp", "--project", "acme-test"], "gcp");
+}
+
+#[test]
+fn azure_store() {
+    vendor_round_trip(&["add-azure", "azure", "--vault", "acme-kv"], "azure");
+}
+
+#[test]
+fn onepassword_store() {
+    vendor_round_trip(&["add-1password", "op", "--vault", "Engineering"], "op");
+}
+
+#[test]
+fn bitwarden_store() {
+    vendor_round_trip(&["add-bitwarden", "bw"], "bw");
+}
+
+#[test]
+fn bitwarden_store_says_how_to_unlock() {
+    let env = Env::new();
+    let fake = fake_vendors(&env);
+    let mut c = env.cmd();
+    fake.apply(&mut c);
+    c.args(["store", "add-bitwarden", "bw"]).assert().success();
+    let mut c = env.cmd();
+    fake.apply(&mut c);
+    c.env_remove("BW_SESSION")
+        .args(["list", "--store", "bw"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("bw unlock --raw"));
+}
+
+/// The real `aws` CLI against LocalStack. Runs when SEALKEEP_TEST_LOCALSTACK is set to
+/// the endpoint, for example http://127.0.0.1:4566.
+#[test]
+fn aws_store_against_localstack() {
+    let Ok(endpoint) = std::env::var("SEALKEEP_TEST_LOCALSTACK") else {
+        return;
+    };
+    let env = Env::new();
+    let aws_env = [
+        ("AWS_ACCESS_KEY_ID", "test"),
+        ("AWS_SECRET_ACCESS_KEY", "test"),
+        ("AWS_DEFAULT_REGION", "us-east-1"),
+    ];
+    let cmd = |args: &[&str], stdin: Option<&str>| {
+        let mut c = env.cmd();
+        for (k, v) in aws_env {
+            c.env(k, v);
+        }
+        c.args(args);
+        if let Some(s) = stdin {
+            c.write_stdin(s.to_string());
+        }
+        c.output().unwrap()
+    };
+    let prefix = format!("sealkeep-test-{}/", std::process::id());
+    let out = cmd(
+        &[
+            "store",
+            "add-aws",
+            "aws",
+            "--prefix",
+            &prefix,
+            "--endpoint-url",
+            &endpoint,
+        ],
+        None,
+    );
+    assert!(out.status.success(), "{out:?}");
+    let out = cmd(
+        &["set", "shared/x/API_KEY", "--stdin", "--store", "aws"],
+        Some(SECRET),
+    );
+    assert!(out.status.success(), "{out:?}");
+    let out = cmd(
+        &["set", "shared/x/OTHER_KEY", "--stdin", "--store", "aws"],
+        Some("other-value-0123456789"),
+    );
+    assert!(out.status.success(), "{out:?}");
+    let out = cmd(&["list", "--store", "aws", "--json"], None);
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["secrets"].as_array().unwrap().len(), 2, "{v}");
+    let mut c = env.cmd();
+    for (k, v) in aws_env {
+        c.env(k, v);
+    }
+    let out = c
+        .args([
+            "run",
+            "aws:shared/x/API_KEY",
+            "--",
+            "sh",
+            "-c",
+            "test \"$API_KEY\" = \"$EXPECT\" && echo same",
+        ])
+        .env("EXPECT", SECRET)
+        .output()
+        .unwrap();
+    assert_eq!(stdout(&out).trim(), "same", "{out:?}");
+    let out = cmd(&["rm", "shared/x/OTHER_KEY", "--store", "aws"], None);
+    assert!(out.status.success(), "{out:?}");
+    let out = cmd(&["list", "--store", "aws", "--json"], None);
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["secrets"].as_array().unwrap().len(), 1, "{v}");
 }
