@@ -81,7 +81,39 @@ fn quote(w: &str) -> String {
 
 const SHELLS: &[&str] = &["bash", "sh", "zsh", "dash", "ksh", "fish"];
 
+/// Remove the body of each quoted heredoc (`<<'EOF'` or `<<"EOF"`). The shell does not
+/// expand or run that text, so a word such as `cat .env` in it is data. The body of an
+/// unquoted heredoc stays, because the shell expands `$(…)` and backticks in it.
+fn strip_quoted_heredocs(cmd: &str) -> String {
+    let mut out = Vec::new();
+    let mut lines = cmd.lines();
+    while let Some(line) = lines.next() {
+        out.push(line);
+        let Some(pos) = line.find("<<") else { continue };
+        let rest = line[pos + 2..].trim_start_matches('-').trim_start();
+        let delim = if let Some(r) = rest.strip_prefix('\'') {
+            r.split('\'').next()
+        } else if let Some(r) = rest.strip_prefix('"') {
+            r.split('"').next()
+        } else {
+            None
+        };
+        let Some(delim) = delim.filter(|d| !d.is_empty()) else {
+            continue;
+        };
+        for body in lines.by_ref() {
+            if body.trim() == delim {
+                out.push(body);
+                break;
+            }
+        }
+    }
+    out.join("\n")
+}
+
 pub fn check_command(cmd: &str, cfg: &Config) -> Option<String> {
+    let stripped = strip_quoted_heredocs(cmd);
+    let cmd = stripped.as_str();
     // A shell runs `$(…)` and `` `…` `` also inside double quotes.
     for sub in substitutions(cmd) {
         if let Some(r) = check_command(&sub, cfg) {
@@ -384,6 +416,20 @@ mod tests {
         assert!(!denied("sealkeep list"));
         assert!(denied("SEALKEEP_ASKPASS_TOKEN=ab sealkeep"));
         assert!(denied("export SEALKEEP_ASKPASS_TOKEN=ab; sealkeep"));
+    }
+
+    #[test]
+    fn quoted_heredocs_are_data() {
+        assert!(!denied(
+            "python3 - <<'EOF'\nx = \"refuses `cat .env`\"\nEOF\necho done"
+        ));
+        assert!(!denied(
+            "cat > notes.md <<\"END\"\nrun `sealkeep get X` never\nEND"
+        ));
+        // Unquoted: the shell runs the substitution.
+        assert!(denied("cat <<EOF\n$(cat .env)\nEOF"));
+        // A command after the heredoc is still checked.
+        assert!(denied("python3 - <<'EOF'\nprint(1)\nEOF\ncat .env"));
     }
 
     #[test]
