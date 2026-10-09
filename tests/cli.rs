@@ -304,10 +304,16 @@ fn folder_runs_refuse_two_secrets_for_one_variable() {
         "postgres://prod-value-123",
     );
     env.cmd()
-        .args(["run", "--all", "personal/app", "--", "true"])
+        .args(["run", "--all", "personal/app", "--recursive", "--", "true"])
         .assert()
         .failure()
         .stderr(predicates::str::contains("both set DATABASE_URL"));
+    // Without --recursive, a folder is one level, as a .env file is.
+    env.cmd()
+        .args(["run", "--all", "personal/app", "--", "true"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("has no secret"));
     let out = env
         .cmd()
         .args([

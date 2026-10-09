@@ -117,7 +117,7 @@ sealkeep run --all personal/example-app/dev -- npm run dev
 sealkeep run -e GITHUB_TOKEN=personal/github/PAT -- gh api user
 ```
 
-A name sets the variable named by its key. `--all FOLDER` sets one variable for each secret in the folder and below, the same as a `.env` file. Two secrets with the same key in one `--all` are an error. `-e VAR=NAME` sets a variable with a different name. `STORE:NAME` reads from one store only.
+A name sets the variable named by its key. `--all FOLDER` sets one variable for each secret in the folder, the same as a `.env` file. `--recursive` also takes the subfolders; two secrets with the same key are then an error. `-e VAR=NAME` sets a variable with a different name. `STORE:NAME` reads from one store only.
 
 For a tool that reads its secrets from a file, `--dotenv` writes a temporary file that only you can read. The file is in `$XDG_RUNTIME_DIR/sealkeep` when it exists. sealkeep puts the path where the command has `{dotenv}`, and it removes the file when the command ends. This example gives Playwright MCP the login of a test account. The agent types the name `ADMIN_PASSWORD`, and Playwright puts in the value:
 

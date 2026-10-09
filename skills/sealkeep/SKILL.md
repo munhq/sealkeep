@@ -35,7 +35,7 @@ sealkeep run -e GITHUB_TOKEN=personal/github/PAT -- gh api user
 ```
 
 - A name sets the variable named by its key (`shared/openrouter/API_KEY` sets `API_KEY`).
-- `--all FOLDER` sets one variable for each secret in the folder and below, the same as a `.env` file. Use the folder of one environment (`…/dev`, `…/prod`), so that two secrets do not set the same variable.
+- `--all FOLDER` sets one variable for each secret in the folder, the same as a `.env` file. `--recursive` also takes the subfolders.
 - `-e VAR=NAME` sets a variable with a different name.
 - Use single quotes around a shell script, so your shell does not expand `$KEY` before sealkeep sets it.
 
@@ -55,6 +55,6 @@ If your client has the sealkeep MCP server, use `list_secrets` (with `folder`), 
 ## When something fails
 
 - `no store has a secret NAME`: tell the person the name to add with `sealkeep set NAME`.
-- `both set KEY`: two secrets in the `--all` folders have the same key. Name a deeper folder, or use `-e` for one of them.
+- `both set KEY`: two secrets in the `--all` folders have the same key. Name one folder, or use `-e` for one of them.
 - `the OS keyring did not answer` or `the keyring is locked`: tell the person to run `sealkeep unlock` in a terminal.
 - Run `sealkeep doctor` to see the stores and the installed clients.
