@@ -1,0 +1,12 @@
+{
+  "name": "sealkeep",
+  "version": "0.3.0",
+  "description": "Let AI agents use secrets without seeing them: inject a secret into one command and redact it from the output.",
+  "mcpServers": {
+    "sealkeep": {
+      "command": "npx",
+      "args": ["-y", "@munhq/sealkeep"]
+    }
+  },
+  "contextFileName": "plugin/skills/sealkeep/SKILL.md"
+}
