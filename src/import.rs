@@ -126,10 +126,11 @@ fn entries(path: &Path, format: Format, folder: &str) -> Result<(Vec<Entry>, Vec
     let mut skipped = Vec::new();
     match format {
         Format::Dotenv => {
-            let iter = dotenvy::from_path_iter(path)
-                .with_context(|| format!("read {}", path.display()))?;
-            for item in iter {
-                let (k, v) = item.with_context(|| format!("parse {}", path.display()))?;
+            let parsed = crate::dotenv::parse_file(path)?;
+            for n in parsed.bad_lines {
+                skipped.push(format!("line {n} (does not parse)"));
+            }
+            for (k, v) in parsed.entries {
                 match key_name(&k) {
                     Some(key) => out.push((k, format!("{folder}/{key}"), v)),
                     None => skipped.push(format!("{k} (no valid name)")),

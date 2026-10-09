@@ -2,6 +2,7 @@
 
 mod audit;
 mod config;
+mod dotenv;
 mod guard;
 mod import;
 mod install;
@@ -535,7 +536,11 @@ fn scan_cmd(
     for f in &report.dotenv_files {
         println!("{}", f.path);
         if let Some(e) = &f.error {
-            println!("  (not parsed: {e})");
+            println!("  (not read: {e})");
+        }
+        if !f.bad_lines.is_empty() {
+            let l: Vec<String> = f.bad_lines.iter().map(|n| n.to_string()).collect();
+            println!("  (lines that do not parse, not shown: {})", l.join(", "));
         }
         for k in &f.keys {
             match k.group {

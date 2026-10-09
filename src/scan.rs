@@ -47,6 +47,9 @@ pub struct KeyReport {
 #[derive(Debug, Serialize)]
 pub struct FileReport {
     pub path: String,
+    /// The numbers of the lines that do not parse. Their text is never shown.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub bad_lines: Vec<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub keys: Vec<KeyReport>,
@@ -181,35 +184,31 @@ pub fn scan(roots: &[PathBuf], opts: &Options) -> Result<Report> {
     for (fi, path) in dotenv.iter().enumerate() {
         let mut rep = FileReport {
             path: path.display().to_string(),
+            bad_lines: Vec::new(),
             error: None,
             keys: Vec::new(),
         };
-        match dotenvy::from_path_iter(path) {
-            Ok(iter) => {
-                for item in iter {
-                    match item {
-                        Ok((key, value)) => {
-                            let c = class(&key, &value);
-                            if !value.is_empty() {
-                                by_value
-                                    .entry(value)
-                                    .or_default()
-                                    .push((fi, rep.keys.len()));
-                            }
-                            rep.keys.push(KeyReport {
-                                key,
-                                class: c,
-                                group: None,
-                            });
-                        }
-                        Err(e) => {
-                            rep.error = Some(format!("{e}"));
-                            break;
-                        }
+        match crate::dotenv::parse_file(path) {
+            Ok(parsed) => {
+                rep.bad_lines = parsed.bad_lines;
+                for (key, value) in parsed.entries {
+                    let c = class(&key, &value);
+                    // Only secrets are grouped: config values such as `localhost` repeat
+                    // in many files and say nothing about shared accounts.
+                    if c == "secret" {
+                        by_value
+                            .entry(value)
+                            .or_default()
+                            .push((fi, rep.keys.len()));
                     }
+                    rep.keys.push(KeyReport {
+                        key,
+                        class: c,
+                        group: None,
+                    });
                 }
             }
-            Err(e) => rep.error = Some(format!("{e}")),
+            Err(e) => rep.error = Some(e.root_cause().to_string()),
         }
         files.push(rep);
     }
@@ -255,8 +254,16 @@ mod tests {
         let b = dir.path().join("b/node_modules");
         std::fs::create_dir_all(&a).unwrap();
         std::fs::create_dir_all(&b).unwrap();
-        std::fs::write(a.join(".env"), "STRIPE_KEY=sk_same\nPORT=3000\n").unwrap();
-        std::fs::write(dir.path().join("b.env"), "STRIPE_SECRET=sk_same\nOTHER=x\n").unwrap();
+        std::fs::write(
+            a.join(".env"),
+            "STRIPE_KEY=sk_same\nPORT=3000\nbad@line=pw-in-a-bad-line\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("b.env"),
+            "STRIPE_SECRET=sk_same\nOTHER=x\nPORT=3000\n",
+        )
+        .unwrap();
         std::fs::write(b.join(".env"), "HIDDEN=sk_same\n").unwrap();
         std::fs::write(dir.path().join(".env.example"), "A=sk_same\n").unwrap();
         std::fs::write(dir.path().join("gh-token"), "t").unwrap();
@@ -275,5 +282,7 @@ mod tests {
         let json = serde_json::to_string(&r).unwrap();
         assert!(!json.contains("sk_same"));
         assert!(!json.contains("3000"));
+        assert!(!json.contains("pw-in-a-bad-line"));
+        assert!(json.contains("\"bad_lines\":[3]"), "{json}");
     }
 }
