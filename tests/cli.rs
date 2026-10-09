@@ -192,10 +192,7 @@ fn import_into_a_folder_prints_names_only() {
         .args(["import", "app.env", "--to", "personal/example-app/dev"])
         .output()
         .unwrap();
-    assert!(
-        String::from_utf8_lossy(&out.stderr)
-            .contains("Stored 0 secrets in local (3 were the same)")
-    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Stored 0 secrets (3 were the same)"));
 
     let out = env
         .cmd()
@@ -807,6 +804,35 @@ fn sync_to_vault_and_run_from_it() {
     assert_eq!(
         stdout(&out).trim(),
         "[sealkeep:shared/stripe/test/SECRET_KEY]",
+        "{out:?}"
+    );
+
+    // With two stores, `set` writes to both.
+    let out = env
+        .cmd()
+        .args(["set", "shared/new/X_KEY", "--stdin"])
+        .write_stdin("value-in-both-stores")
+        .env("VAULT_TOKEN", "test-token")
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("Stored shared/new/X_KEY in local, vault"),
+        "{out:?}"
+    );
+    assert_eq!(
+        state.lock().unwrap()["shared/new"].data["X_KEY"],
+        "value-in-both-stores"
+    );
+    // A bare name has no folder, so it goes to the keyring only.
+    let out = env
+        .cmd()
+        .args(["set", "BARE_TWO", "--stdin"])
+        .write_stdin("bare-value-456")
+        .env("VAULT_TOKEN", "test-token")
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("Stored BARE_TWO in local."),
         "{out:?}"
     );
 

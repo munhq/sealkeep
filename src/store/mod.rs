@@ -73,6 +73,21 @@ impl Stores {
             .with_context(|| format!("no store named `{name}` (run `sealkeep store list`)"))
     }
 
+    /// The stores that a write of `name` goes to: the named store, else every store, so
+    /// the keyring and the Vault replica stay the same. A Vault store takes only a name
+    /// with a folder.
+    pub fn write_targets(&self, store: Option<&str>, name: &str) -> Result<Vec<&dyn Store>> {
+        match store {
+            Some(n) => Ok(vec![self.by_name(n)?]),
+            None => Ok(self
+                .stores
+                .iter()
+                .map(|s| s.as_ref())
+                .filter(|s| !(s.kind() == "vault" && names::folder_of(name).is_empty()))
+                .collect()),
+        }
+    }
+
     /// The store for a write: the named one, else the first in the config.
     pub fn for_write(&self, name: Option<&str>) -> Result<&dyn Store> {
         match name {
