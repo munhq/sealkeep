@@ -9,8 +9,9 @@
 </p>
 
 <p align="center">
-  <a href="cursor://anysphere.cursor-deeplink/mcp/install?name=sealkeep&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIkBtdW5ocS9zZWFsa2VlcCJdfQ=="><img alt="Install in Cursor" src="https://img.shields.io/badge/Install-Cursor-000?logo=cursor"></a>
-  <a href="vscode:mcp/install?%7B%22name%22%3A%22sealkeep%22%2C%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22%40munhq%2Fsealkeep%22%5D%7D"><img alt="Install in VS Code" src="https://img.shields.io/badge/Install-VS%20Code-007ACC?logo=visualstudiocode"></a>
+
+[![Install in Cursor](https://img.shields.io/badge/Install-Cursor-000?logo=cursor)](cursor://anysphere.cursor-deeplink/mcp/install?name=sealkeep&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIkBtdW5ocS9zZWFsa2VlcCJdfQ==) [![Install in VS Code](https://img.shields.io/badge/Install-VS%20Code-007ACC?logo=visualstudiocode)](vscode:mcp/install?%7B%22name%22%3A%22sealkeep%22%2C%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22%40munhq%2Fsealkeep%22%5D%7D)
+
 </p>
 
 # sealkeep
