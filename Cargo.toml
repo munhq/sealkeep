@@ -1,9 +1,9 @@
 [package]
 name = "sealkeep"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
-description = "Give AI agents the use of your secrets without the values: named secrets in the OS keyring (Vault as a replica), injected into a command and redacted from its output."
+description = "Give AI agents the use of your secrets without the values: named secrets in the OS keyring, Vault, AWS, Google, Azure, 1Password or Bitwarden, injected into a command and redacted from its output."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/munhq/sealkeep"
 readme = "README.md"
@@ -22,6 +22,7 @@ rpassword = "7.5.4"
 schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+sha2 = "0.11"
 time = { version = "0.3.55", features = ["formatting", "serde"] }
 tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "io-std"] }
 toml = "1.1.8"

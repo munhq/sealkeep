@@ -1,7 +1,13 @@
 //! The secret stores. Each store keeps values under names; sealkeep reads a value only
 //! to inject it into a command, and never prints it unless a person asks at a terminal.
 
+pub mod aws;
+pub mod azure;
+pub mod bitwarden;
+pub mod cli;
+pub mod gcp;
 pub mod keyring;
+pub mod onepassword;
 pub mod vault;
 
 use crate::config::{Config, StoreConfig};
@@ -34,6 +40,10 @@ pub trait Store {
     fn remove(&self, name: &str) -> Result<bool>;
     /// One line for `doctor`. An error means the store cannot be used now.
     fn status(&self) -> Result<String>;
+    /// Whether a name needs a folder in this store. Only the keyring takes a bare name.
+    fn needs_folder(&self) -> bool {
+        self.kind() != "keyring"
+    }
 }
 
 pub fn open(cfg: &StoreConfig) -> Box<dyn Store> {
@@ -42,6 +52,32 @@ pub fn open(cfg: &StoreConfig) -> Box<dyn Store> {
             Box::new(keyring::KeyringStore::new(name.clone(), service.clone()))
         }
         StoreConfig::Vault { .. } => Box::new(vault::VaultStore::new(cfg.clone())),
+        StoreConfig::Aws {
+            name,
+            region,
+            profile,
+            prefix,
+            endpoint_url,
+        } => Box::new(aws::AwsStore {
+            name: name.clone(),
+            region: region.clone(),
+            profile: profile.clone(),
+            prefix: prefix.clone(),
+            endpoint_url: endpoint_url.clone(),
+        }),
+        StoreConfig::Gcp { name, project } => Box::new(gcp::GcpStore {
+            name: name.clone(),
+            project: project.clone(),
+        }),
+        StoreConfig::Azure { name, vault } => Box::new(azure::AzureStore {
+            name: name.clone(),
+            vault: vault.clone(),
+        }),
+        StoreConfig::Onepassword { name, vault } => Box::new(onepassword::OpStore {
+            name: name.clone(),
+            vault: vault.clone(),
+        }),
+        StoreConfig::Bitwarden { name } => Box::new(bitwarden::BwStore { name: name.clone() }),
     }
 }
 
@@ -83,7 +119,7 @@ impl Stores {
                 .stores
                 .iter()
                 .map(|s| s.as_ref())
-                .filter(|s| !(s.kind() == "vault" && names::folder_of(name).is_empty()))
+                .filter(|s| !(s.needs_folder() && names::folder_of(name).is_empty()))
                 .collect()),
         }
     }

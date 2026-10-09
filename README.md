@@ -199,6 +199,21 @@ sealkeep sync --from local --to vault   # one time, for the secrets that are alr
 
 `set`, `import` and `mv` write to every store (a Vault store takes only names with a folder), so the stores stay the same. `--store NAME` writes to one store. The Vault side needs a KV v2 mount, a policy with `create`, `read` and `update` on `agent/data/*` and `read`, `list` and `update` on `agent/metadata/*`, and a Kubernetes auth role bound to the ServiceAccount. With `--auth token`, sealkeep reads `$VAULT_TOKEN`, or the token that `sealkeep store token vault` keeps in the keyring.
 
+### Other secret managers
+
+Each of these is a store kind. It runs the official CLI of the vendor, so the vendor's own sign-in (SSO, a service account, biometrics) applies, and sealkeep keeps no vendor token. A value goes to the CLI through stdin or through a file that only you can read, never as a command argument, which `ps` would show.
+
+| Store | Add it | Layout | The value goes in through |
+|---|---|---|---|
+| AWS Secrets Manager | `sealkeep store add-aws aws --region eu-west-1` | One JSON secret for each folder, `sealkeep/<folder>` | `--secret-string file://…` |
+| Google Secret Manager | `sealkeep store add-gcp gcp --project acme-prod` | One secret for each name; annotations hold the name | `--data-file=-` (stdin) |
+| Azure Key Vault | `sealkeep store add-azure azure --vault acme-kv` | One secret for each name; tags hold the name | `--file …` |
+| 1Password (CLI 2.23+) | `sealkeep store add-1password op --vault Engineering` | One Secure Note for each folder, one concealed field for each key | the item JSON on stdin |
+| Bitwarden / Vaultwarden | `sealkeep store add-bitwarden bw` | One Secure Note `sealkeep:<folder>`, one hidden field for each key | the item JSON on stdin |
+| OpenBao | `sealkeep store add-vault …` | as Vault | as Vault |
+
+Google and Azure allow only some characters in a secret ID, so the ID is the name with `/` as `--` and a short hash, and the real name is in an annotation or a tag. Azure keeps a removed secret in its soft-delete state, and a later `set` of the same name recovers it. For Bitwarden, unlock first: `export BW_SESSION=$(bw unlock --raw)`. The Bitwarden Secrets Manager CLI (`bws`) takes a value only as a command argument, so sealkeep uses the password manager CLI (`bw`).
+
 ## SSH keys
 
 An SSH agent holds a key with a passphrase only in memory. After a reboot it is empty, and an agent's `git push` fails with `Permission denied (publickey)`. sealkeep keeps the passphrase and loads the key:

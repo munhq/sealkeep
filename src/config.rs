@@ -125,6 +125,33 @@ pub enum StoreConfig {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         port_forward: Vec<String>,
     },
+    /// AWS Secrets Manager through the `aws` CLI. One JSON secret for each folder,
+    /// named `<prefix><folder>`.
+    Aws {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        region: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<String>,
+        #[serde(default = "default_aws_prefix")]
+        prefix: String,
+        /// Another endpoint, for example a LocalStack test server.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        endpoint_url: Option<String>,
+    },
+    /// Google Secret Manager through the `gcloud` CLI. One secret for each name.
+    Gcp { name: String, project: String },
+    /// Azure Key Vault through the `az` CLI. One secret for each name.
+    Azure { name: String, vault: String },
+    /// 1Password through the `op` CLI. One item for each folder, one field for each key.
+    Onepassword { name: String, vault: String },
+    /// Bitwarden or Vaultwarden through the `bw` CLI. One item for each folder, one
+    /// hidden field for each key. `bw` must be unlocked (`$BW_SESSION`).
+    Bitwarden { name: String },
+}
+
+fn default_aws_prefix() -> String {
+    "sealkeep/".to_string()
 }
 
 fn default_service() -> String {
@@ -138,7 +165,13 @@ fn default_k8s_mount() -> String {
 impl StoreConfig {
     pub fn name(&self) -> &str {
         match self {
-            StoreConfig::Keyring { name, .. } | StoreConfig::Vault { name, .. } => name,
+            StoreConfig::Keyring { name, .. }
+            | StoreConfig::Vault { name, .. }
+            | StoreConfig::Aws { name, .. }
+            | StoreConfig::Gcp { name, .. }
+            | StoreConfig::Azure { name, .. }
+            | StoreConfig::Onepassword { name, .. }
+            | StoreConfig::Bitwarden { name } => name,
         }
     }
 }

@@ -240,6 +240,39 @@ enum StoreCmd {
         #[arg(long)]
         port_forward: Option<String>,
     },
+    /// Add AWS Secrets Manager as a store (uses the `aws` CLI and its sign-in).
+    AddAws {
+        name: String,
+        #[arg(long)]
+        region: Option<String>,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long, default_value = "sealkeep/")]
+        prefix: String,
+        #[arg(long)]
+        endpoint_url: Option<String>,
+    },
+    /// Add Google Secret Manager as a store (uses the `gcloud` CLI and its sign-in).
+    AddGcp {
+        name: String,
+        #[arg(long)]
+        project: String,
+    },
+    /// Add Azure Key Vault as a store (uses the `az` CLI and its sign-in).
+    AddAzure {
+        name: String,
+        #[arg(long)]
+        vault: String,
+    },
+    /// Add a 1Password vault as a store (uses the `op` CLI, 2.23 or later, and its sign-in).
+    #[command(name = "add-1password")]
+    AddOnepassword {
+        name: String,
+        #[arg(long)]
+        vault: String,
+    },
+    /// Add Bitwarden or Vaultwarden as a store (uses the `bw` CLI; export BW_SESSION).
+    AddBitwarden { name: String },
     /// Store the Vault token of a store (token auth) in the keyring. Reads stdin or a prompt.
     Token { store: String },
     /// Remove a store from the config. Its secrets stay where they are.
@@ -710,8 +743,12 @@ fn sync(from: &str, to: &str, folder: Option<&str>, dry_run: bool) -> Result<i32
     items.sort_by(|a, b| a.name.cmp(&b.name));
     let (mut copied, mut same, mut skipped) = (Vec::new(), 0usize, Vec::new());
     for i in &items {
-        if names::folder_of(&i.name).is_empty() && dst.kind() == "vault" {
-            skipped.push(format!("{} (Vault needs a folder)", i.name));
+        if names::folder_of(&i.name).is_empty() && dst.needs_folder() {
+            skipped.push(format!(
+                "{} (the {} store needs a folder)",
+                i.name,
+                dst.kind()
+            ));
             continue;
         }
         let Some(value) = src.get(&i.name)? else {
@@ -795,6 +832,23 @@ fn store_cmd(cmd: StoreCmd) -> Result<i32> {
                         auth,
                         ..
                     } => println!("{name}  vault  {address} mount={mount} auth={auth:?}"),
+                    StoreConfig::Aws {
+                        name,
+                        region,
+                        prefix,
+                        ..
+                    } => println!(
+                        "{name}  aws  prefix={prefix} region={}",
+                        region.as_deref().unwrap_or("(default)")
+                    ),
+                    StoreConfig::Gcp { name, project } => {
+                        println!("{name}  gcp  project={project}")
+                    }
+                    StoreConfig::Azure { name, vault } => println!("{name}  azure  vault={vault}"),
+                    StoreConfig::Onepassword { name, vault } => {
+                        println!("{name}  1password  vault={vault}")
+                    }
+                    StoreConfig::Bitwarden { name } => println!("{name}  bitwarden"),
                 }
             }
             eprintln!("(config: {})", config::path()?.display());
@@ -831,10 +885,29 @@ fn store_cmd(cmd: StoreCmd) -> Result<i32> {
                 .map(split_command)
                 .unwrap_or_default(),
         }),
+        StoreCmd::AddAws {
+            name,
+            region,
+            profile,
+            prefix,
+            endpoint_url,
+        } => cfg.stores.push(StoreConfig::Aws {
+            name,
+            region,
+            profile,
+            prefix,
+            endpoint_url,
+        }),
+        StoreCmd::AddGcp { name, project } => cfg.stores.push(StoreConfig::Gcp { name, project }),
+        StoreCmd::AddAzure { name, vault } => cfg.stores.push(StoreConfig::Azure { name, vault }),
+        StoreCmd::AddOnepassword { name, vault } => {
+            cfg.stores.push(StoreConfig::Onepassword { name, vault })
+        }
+        StoreCmd::AddBitwarden { name } => cfg.stores.push(StoreConfig::Bitwarden { name }),
         StoreCmd::Token { store } => {
             match cfg.store(&store)? {
                 StoreConfig::Vault { .. } => {}
-                StoreConfig::Keyring { .. } => bail!("store `{store}` is a keyring store"),
+                _ => bail!("store `{store}` is not a Vault store"),
             }
             let token = read_value("the Vault token", !std::io::stdin().is_terminal(), None)?;
             store::keyring::write(

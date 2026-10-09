@@ -32,3 +32,26 @@ jobs:
       - run: cargo clippy --locked --all-targets --features test-store -- -D warnings
       - run: cargo clippy --locked --release -- -D warnings
       - run: cargo test --locked --features test-store
+  # The AWS store with the real aws CLI, against LocalStack.
+  localstack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      localstack:
+        image: localstack/localstack:4.9
+        ports: ["4566:4566"]
+        env:
+          SERVICES: secretsmanager
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Wait for LocalStack
+        run: for i in $(seq 1 60); do curl -sf http://127.0.0.1:4566/_localstack/health && break; sleep 2; done
+      - run: cargo test --locked --features test-store --test cli aws_store_against_localstack
+        env:
+          SEALKEEP_TEST_LOCALSTACK: http://127.0.0.1:4566
