@@ -8,6 +8,15 @@
     "source": "github"
   },
   "version": "0.3.0",
+  "icons": [
+    {
+      "src": "https://raw.githubusercontent.com/munhq/sealkeep/main/docs/brand/icon-512.png",
+      "mimeType": "image/png",
+      "sizes": [
+        "512x512"
+      ]
+    }
+  ],
   "packages": [
     {
       "registryType": "npm",
@@ -19,7 +28,7 @@
       "environmentVariables": [
         {
           "name": "SEALKEEP_CONFIG",
-          "description": "Path of the config file (stores, aliases, guard rules). Default: the config folder of the OS, for example ~/.config/sealkeep/config.toml. With no file, sealkeep uses the OS keyring.",
+          "description": "Path of the config file (stores, aliases, guard rules). Default: the config folder of the OS. With no file, sealkeep uses the OS keyring.",
           "isRequired": false,
           "isSecret": false,
           "format": "string"

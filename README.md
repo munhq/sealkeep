@@ -1,3 +1,12 @@
+<p align="center"><img src="docs/brand/banner.png" alt="sealkeep: your agent uses the key, it never sees it" width="100%"></p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/@munhq/sealkeep"><img alt="npm" src="https://img.shields.io/npm/v/@munhq/sealkeep?color=a3122f"></a>
+  <a href="https://registry.modelcontextprotocol.io/v0/servers?search=io.github.munhq/sealkeep"><img alt="MCP registry" src="https://img.shields.io/badge/MCP_registry-io.github.munhq%2Fsealkeep-a3122f"></a>
+  <a href="https://github.com/munhq/sealkeep/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/munhq/sealkeep/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/licence-MIT-a3122f"></a>
+</p>
+
 # sealkeep
 
 sealkeep lets an AI agent use your secrets without seeing them.
@@ -23,6 +32,14 @@ It has four parts:
 4. **A skill** that tells the agent when and how to use the CLI.
 
 ## Install
+
+As an MCP server only (any client):
+
+```json
+{ "mcpServers": { "sealkeep": { "command": "npx", "args": ["-y", "@munhq/sealkeep"] } } }
+```
+
+The full install below also adds the guard hook and the skill.
 
 Linux and macOS:
 

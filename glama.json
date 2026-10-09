@@ -4,7 +4,7 @@
     "darkkraft"
   ],
   "name": "sealkeep",
-  "description": "Give AI agents the use of your secrets without the values. An agent asks for a secret by name; sealkeep puts the value into the environment of one command and replaces it with [sealkeep:NAME] in all output. Secrets live in the OS keyring, HashiCorp Vault or OpenBao, AWS Secrets Manager, Google Secret Manager, Azure Key Vault, 1Password or Bitwarden. Tools: list_secrets, run_with_secrets, store_status; no tool returns a value.",
+  "description": "Give AI agents the use of your secrets without the values: the agent asks for a secret by name, sealkeep injects it into one command and redacts it from the output. Secrets live in the OS keyring, Vault or OpenBao, AWS, Google, Azure, 1Password or Bitwarden.",
   "category": "security",
   "tags": [
     "mcp",
