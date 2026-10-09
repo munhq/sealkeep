@@ -730,6 +730,11 @@ fn sync_to_vault_and_run_from_it() {
     env.set("personal/app/dev/DATABASE_URL", "postgres://u:p@h/app-dev");
     env.set("BARE_KEY", "bare-value-123");
     env.cmd()
+        .args(["set", "personal/ssh/NO_DESC_PASSPHRASE", "--stdin"])
+        .write_stdin("passphrase-with-no-description")
+        .assert()
+        .success();
+    env.cmd()
         .args([
             "store",
             "add-vault",
@@ -750,7 +755,7 @@ fn sync_to_vault_and_run_from_it() {
         .unwrap();
     let e = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{e}");
-    assert!(e.contains("Copied 2 secrets"), "{e}");
+    assert!(e.contains("Copied 3 secrets"), "{e}");
     assert!(e.contains("skipped BARE_KEY (Vault needs a folder)"), "{e}");
     assert!(!e.contains(SECRET));
     {
@@ -777,7 +782,14 @@ fn sync_to_vault_and_run_from_it() {
         .output()
         .unwrap();
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["secrets"].as_array().unwrap().len(), 2, "{v}");
+    assert_eq!(v["secrets"].as_array().unwrap().len(), 3, "{v}");
+    let no_desc = v["secrets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["name"] == "personal/ssh/NO_DESC_PASSPHRASE")
+        .unwrap();
+    assert!(no_desc.get("description").is_none(), "{no_desc}");
 
     let out = env
         .cmd()

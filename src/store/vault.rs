@@ -21,6 +21,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use ureq::Agent;
 
+/// The custom_metadata value of a key with no description.
+const NO_DESCRIPTION: &str = "-";
+
 pub struct VaultStore {
     name: String,
     address: String,
@@ -372,6 +375,11 @@ impl Store for VaultStore {
                     continue;
                 }
                 let d = desc.as_str().unwrap_or("").to_string();
+                let d = if d == NO_DESCRIPTION {
+                    String::new()
+                } else {
+                    d
+                };
                 out.push(SecretInfo {
                     store: self.name.clone(),
                     name: format!("{folder}/{key}"),
@@ -406,9 +414,16 @@ impl Store for VaultStore {
         let keep = custom
             .get(key)
             .and_then(Value::as_str)
+            .filter(|d| *d != NO_DESCRIPTION)
             .unwrap_or("")
             .to_string();
         let desc: String = description.unwrap_or(&keep).chars().take(500).collect();
+        // Vault refuses an empty custom_metadata value, so no description is `-`.
+        let desc = if desc.trim().is_empty() {
+            NO_DESCRIPTION.to_string()
+        } else {
+            desc
+        };
         custom.insert(key.to_string(), json!(desc));
         self.write_meta(folder, custom)
     }
