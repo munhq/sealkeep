@@ -42,6 +42,44 @@ pub struct KeyReport {
     /// The same value is in each place with this group number.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group: Option<usize>,
+    /// The kind of credential, from the public prefix of the value (`stripe-live`,
+    /// `github-pat`, …). The prefix is part of the format of the provider, not of the
+    /// secret.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<&'static str>,
+}
+
+/// Known public prefixes of credentials.
+const PREFIXES: &[(&str, &str)] = &[
+    ("sk_live_", "stripe-live-secret"),
+    ("sk_test_", "stripe-test-secret"),
+    ("rk_live_", "stripe-live-restricted"),
+    ("rk_test_", "stripe-test-restricted"),
+    ("pk_live_", "stripe-live-publishable"),
+    ("pk_test_", "stripe-test-publishable"),
+    ("whsec_", "stripe-webhook"),
+    ("ghp_", "github-pat-classic"),
+    ("github_pat_", "github-pat-fine-grained"),
+    ("gho_", "github-oauth"),
+    ("glpat-", "gitlab-pat"),
+    ("xoxb-", "slack-bot"),
+    ("xoxp-", "slack-user"),
+    ("https://hooks.slack.com/", "slack-webhook"),
+    ("https://discord.com/api/webhooks/", "discord-webhook"),
+    ("AKIA", "aws-access-key-id"),
+    ("sk-or-", "openrouter"),
+    ("sk-ant-", "anthropic"),
+    ("sk-proj-", "openai-project"),
+    ("nvapi-", "nvidia"),
+    ("AIza", "google-api"),
+    ("-----BEGIN", "pem"),
+];
+
+fn kind(value: &str) -> Option<&'static str> {
+    PREFIXES
+        .iter()
+        .find(|(p, _)| value.starts_with(p))
+        .map(|(_, k)| *k)
 }
 
 #[derive(Debug, Serialize)]
@@ -203,6 +241,7 @@ pub fn scan(roots: &[PathBuf], opts: &Options) -> Result<Report> {
                     .collect();
                 for (key, value) in parsed.entries {
                     let c = class(&key, &value);
+                    let hint = if c == "secret" { kind(&value) } else { None };
                     // Only secrets are grouped: config values such as `localhost` repeat
                     // in many files and say nothing about shared accounts.
                     if c == "secret" {
@@ -212,6 +251,7 @@ pub fn scan(roots: &[PathBuf], opts: &Options) -> Result<Report> {
                             .push((fi, rep.keys.len()));
                     }
                     rep.keys.push(KeyReport {
+                        kind: hint,
                         key,
                         class: c,
                         group: None,
@@ -254,6 +294,8 @@ mod tests {
         assert_eq!(class("DATABASE_URL", "postgres://u:p@h/db"), "secret");
         assert_eq!(class("DATABASE_URL", "postgres://h/db"), "config");
         assert_eq!(class("SMTP_SUPPORT", "pw"), "secret");
+        assert_eq!(kind("sk_live_abc"), Some("stripe-live-secret"));
+        assert_eq!(kind("hello"), None);
         assert_eq!(class("PORT", "3000"), "config");
         assert_eq!(class("API_KEY", ""), "empty");
     }
