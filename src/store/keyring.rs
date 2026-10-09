@@ -164,38 +164,123 @@ pub fn default_locked() -> Result<Option<bool>> {
     Ok(None)
 }
 
-/// Unlock GNOME Keyring with the login password, for a session that has no desktop to
-/// show the unlock prompt.
+/// Unlock the `login` collection of GNOME Keyring with its password, or create it with
+/// this password when it does not exist, and make it the default collection. This is for
+/// a session that has no desktop to show the unlock prompt.
+///
+/// It calls the daemon that owns `org.freedesktop.secrets` on the session bus.
+/// `gnome-keyring-daemon --unlock` started a second daemon that wrote its own
+/// `login.keyring` and left the daemon on the bus locked.
 #[cfg(all(unix, not(target_os = "macos")))]
 pub fn unlock_gnome_keyring(password: &str) -> Result<()> {
-    use std::io::Write as _;
-    use std::process::{Command, Stdio};
-    let mut cmd = Command::new("gnome-keyring-daemon");
-    cmd.arg("--unlock")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    if std::env::var_os("GNOME_KEYRING_CONTROL").is_none()
-        && let Some(rt) = std::env::var_os("XDG_RUNTIME_DIR")
-    {
-        let control = std::path::Path::new(&rt).join("keyring");
-        if control.join("control").exists() {
-            cmd.env("GNOME_KEYRING_CONTROL", control);
+    use std::collections::HashMap;
+    use zbus::blocking::Connection;
+    use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+
+    const DEST: &str = "org.freedesktop.secrets";
+    const ROOT: &str = "/org/freedesktop/secrets";
+    const SERVICE: &str = "org.freedesktop.Secret.Service";
+    const GNOME: &str = "org.gnome.keyring.InternalUnsupportedGuiltRiddenInterface";
+
+    let conn = Connection::session().context("connect to the session bus")?;
+    let (_, session): (OwnedValue, OwnedObjectPath) = conn
+        .call_method(
+            Some(DEST),
+            ROOT,
+            Some(SERVICE),
+            "OpenSession",
+            &("plain", Value::from("")),
+        )
+        .context("open a Secret Service session")?
+        .body()
+        .deserialize()?;
+    let secret = (
+        session.clone(),
+        Vec::<u8>::new(),
+        password.as_bytes().to_vec(),
+        "text/plain",
+    );
+
+    let alias: OwnedObjectPath = conn
+        .call_method(Some(DEST), ROOT, Some(SERVICE), "ReadAlias", &("default",))?
+        .body()
+        .deserialize()?;
+    let collections: OwnedValue = conn
+        .call_method(
+            Some(DEST),
+            ROOT,
+            Some("org.freedesktop.DBus.Properties"),
+            "Get",
+            &(SERVICE, "Collections"),
+        )?
+        .body()
+        .deserialize()?;
+    let collections: Vec<OwnedObjectPath> = collections.try_into().unwrap_or_default();
+
+    // The default collection, else the login collection. Its path comes from the file
+    // name, so `login.keyring` and `Login.keyring` give different paths.
+    let target = if alias.as_str() != "/" {
+        Some(alias.clone())
+    } else {
+        collections
+            .iter()
+            .find(|c| {
+                c.as_str()
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|n| n.eq_ignore_ascii_case("login"))
+            })
+            .cloned()
+    };
+
+    let login: OwnedObjectPath = match target {
+        Some(c) => {
+            conn.call_method(
+                Some(DEST),
+                ROOT,
+                Some(GNOME),
+                "UnlockWithMasterPassword",
+                &(&c, &secret),
+            )
+            .context("unlock the login keyring (is the password right?)")?;
+            c
         }
+        None => {
+            let mut attrs: HashMap<&str, Value> = HashMap::new();
+            attrs.insert(
+                "org.freedesktop.Secret.Collection.Label",
+                Value::from("login"),
+            );
+            conn.call_method(
+                Some(DEST),
+                ROOT,
+                Some(GNOME),
+                "CreateWithMasterPassword",
+                &(attrs, &secret),
+            )
+            .context("create the login keyring")?
+            .body()
+            .deserialize()?
+        }
+    };
+
+    if alias.as_str() == "/" {
+        conn.call_method(
+            Some(DEST),
+            ROOT,
+            Some(SERVICE),
+            "SetAlias",
+            &("default", &login),
+        )
+        .context("make the login keyring the default collection")?;
     }
-    let mut child = cmd.spawn().context("start gnome-keyring-daemon --unlock")?;
-    child
-        .stdin
-        .take()
-        .expect("stdin is piped")
-        .write_all(password.as_bytes())?;
-    let out = child.wait_with_output()?;
-    if !out.status.success() {
-        anyhow::bail!(
-            "gnome-keyring-daemon --unlock failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
+    let _ = conn.call_method(
+        Some(DEST),
+        session.as_str(),
+        Some("org.freedesktop.Secret.Session"),
+        "Close",
+        &(),
+    );
     Ok(())
 }
 

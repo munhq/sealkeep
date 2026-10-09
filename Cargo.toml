@@ -37,6 +37,7 @@ windows-native-keyring-store = "1.1.0"
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 zbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust"] }
 secret-service = { version = "5.2.0", features = ["crypto-rust"] }
+zbus = { version = "5.19.0", default-features = false, features = ["blocking-api", "async-io"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.190"

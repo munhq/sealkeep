@@ -169,7 +169,11 @@ enum Cmd {
     },
     /// Unlock the OS keyring: with the login password at a terminal (GNOME Keyring with no
     /// desktop), or with the prompt on the desktop.
-    Unlock,
+    Unlock {
+        /// Read the password from stdin.
+        #[arg(long)]
+        stdin: bool,
+    },
     /// Add the SSH keys of the config to their agents, with passphrases from sealkeep.
     SshLoad,
     /// Add an SSH key to the config of `ssh-load`.
@@ -334,7 +338,7 @@ fn dispatch(cmd: Cmd) -> Result<i32> {
             },
             false,
         ),
-        Cmd::Unlock => unlock(),
+        Cmd::Unlock { stdin } => unlock(stdin),
         Cmd::SshLoad => ssh_load(),
         Cmd::SshAdd {
             path,
@@ -870,7 +874,7 @@ fn install_cmd(
     Ok(if failed { 1 } else { 0 })
 }
 
-fn unlock() -> Result<i32> {
+fn unlock(from_stdin: bool) -> Result<i32> {
     match store::keyring::default_locked()? {
         None => {
             eprintln!("The login keychain opens with your session; there is nothing to unlock.");
@@ -883,15 +887,21 @@ fn unlock() -> Result<i32> {
         Some(true) => {}
     }
     #[cfg(all(unix, not(target_os = "macos")))]
-    if std::io::stdin().is_terminal()
+    if (from_stdin || std::io::stdin().is_terminal())
         && std::process::Command::new("gnome-keyring-daemon")
             .arg("--version")
             .output()
             .is_ok_and(|o| o.status.success())
     {
-        let pw = rpassword::prompt_password(
-            "Password of the login keyring (a new keyring gets this password): ",
-        )?;
+        let pw = if from_stdin {
+            let mut s = String::new();
+            std::io::stdin().read_to_string(&mut s)?;
+            trim_newline(s)
+        } else {
+            rpassword::prompt_password(
+                "Password of the login keyring (a new keyring gets this password): ",
+            )?
+        };
         store::keyring::unlock_gnome_keyring(&pw)?;
         if store::keyring::default_locked()? == Some(false) {
             eprintln!("The keyring is unlocked.");
