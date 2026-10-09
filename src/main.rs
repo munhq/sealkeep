@@ -903,6 +903,9 @@ fn install_cmd(
 }
 
 fn unlock(from_stdin: bool) -> Result<i32> {
+    // The password is read only for GNOME Keyring; macOS and Windows unlock with the session.
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    let _ = from_stdin;
     match store::keyring::default_locked()? {
         None => {
             eprintln!("The login keychain opens with your session; there is nothing to unlock.");
