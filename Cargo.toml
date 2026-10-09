@@ -1,0 +1,57 @@
+[package]
+name = "sealkeep"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Give AI agents the use of your secrets without the values: inject them into a command, redact them from its output, keep them in the OS keyring or a Proxium project."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/munhq/sealkeep"
+readme = "README.md"
+keywords = ["secrets", "keyring", "mcp", "ai-agents", "cli"]
+categories = ["command-line-utilities", "authentication"]
+
+[dependencies]
+aho-corasick = "1.1.5"
+anyhow = "1.0.104"
+base64 = "0.23.1"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+directories = "6.0.0"
+dotenvy = "0.15.7"
+keyring-core = "1.0.0"
+rmcp = { version = "3.5.1", features = ["server", "transport-io", "macros"] }
+rpassword = "7.5.4"
+schemars = "1.2.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+time = { version = "0.3.55", features = ["formatting", "serde"] }
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "io-std"] }
+toml = "1.1.8"
+ureq = { version = "3.4.2", features = ["json"] }
+webbrowser = "1.2.4"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store = "1.1.0"
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+zbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust"] }
+secret-service = { version = "5.2.0", features = ["crypto-rust"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.190"
+
+[features]
+# A file-backed keyring for the integration tests. Release builds leave it out.
+test-store = ["keyring-core/sample"]
+
+[dev-dependencies]
+assert_cmd = "2.2.2"
+predicates = "3.1.4"
+tempfile = "3.27.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
