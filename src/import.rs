@@ -183,7 +183,6 @@ pub fn run(args: ImportArgs) -> Result<i32> {
 
     let mut cfg = Config::load()?;
     let stores = Stores::from_config(&cfg);
-    let s = stores.for_write(args.store.as_deref())?;
     let desc = args.description.clone().unwrap_or_else(|| {
         let f = args
             .file
@@ -193,9 +192,10 @@ pub fn run(args: ImportArgs) -> Result<i32> {
         format!("imported from {f}")
     });
 
-    let mut stored = Vec::new();
+    // name -> the stores it was written to
+    let mut stored: Vec<(String, Vec<String>)> = Vec::new();
     let mut aliased = Vec::new();
-    let mut unchanged = Vec::new();
+    let mut unchanged = 0usize;
     for (raw, target, value) in items {
         if !args.only.is_empty() && !args.only.contains(&raw) {
             continue;
@@ -212,36 +212,44 @@ pub fn run(args: ImportArgs) -> Result<i32> {
             skipped.push(format!("{raw} ({target} is an alias; use --map)"));
             continue;
         }
-        match map.get(&raw) {
+        let name = match map.get(&raw) {
             Some(shared) => {
-                match s.get(shared)? {
-                    Some(existing) if existing == value => unchanged.push(shared.clone()),
-                    Some(_) if !args.force => bail!(
-                        "`{shared}` already has a different value than {raw} of {}; check which one is current, then use --force to replace it",
-                        args.file.display()
-                    ),
-                    _ => {
-                        if !args.dry_run {
-                            s.set(shared, &value, Some(&desc))?;
-                        }
-                        stored.push(shared.clone());
-                    }
-                }
                 if !args.dry_run {
                     cfg.aliases.insert(target.clone(), shared.clone());
                 }
                 aliased.push(format!("{target} -> {shared}"));
+                shared.clone()
             }
-            None => {
-                if s.get(&target)?.as_deref() == Some(value.as_str()) {
-                    unchanged.push(target);
-                    continue;
+            None => target.clone(),
+        };
+        let targets = stores.write_targets(args.store.as_deref(), &name)?;
+        if map.contains_key(&raw) && !args.force {
+            for s in &targets {
+                if let Some(existing) = s.get(&name)?
+                    && existing != value
+                {
+                    bail!(
+                        "`{name}` in {} already has a different value than {raw} of {}; check which one is current, then use --force to replace it",
+                        s.name(),
+                        args.file.display()
+                    );
                 }
-                if !args.dry_run {
-                    s.set(&target, &value, Some(&desc))?;
-                }
-                stored.push(target);
             }
+        }
+        let mut wrote = Vec::new();
+        for s in &targets {
+            if s.get(&name)?.as_deref() == Some(value.as_str()) {
+                continue;
+            }
+            if !args.dry_run {
+                s.set(&name, &value, Some(&desc))?;
+            }
+            wrote.push(s.name().to_string());
+        }
+        if wrote.is_empty() {
+            unchanged += 1;
+        } else {
+            stored.push((name, wrote));
         }
     }
     if !args.dry_run && !aliased.is_empty() {
@@ -250,7 +258,10 @@ pub fn run(args: ImportArgs) -> Result<i32> {
     if !args.dry_run && !stored.is_empty() {
         crate::record(
             "import",
-            stored.iter().map(|n| format!("{}:{n}", s.name())).collect(),
+            stored
+                .iter()
+                .flat_map(|(n, ss)| ss.iter().map(move |s| format!("{s}:{n}")))
+                .collect(),
             Some(args.file.display().to_string()),
         )?;
     }
@@ -260,13 +271,11 @@ pub fn run(args: ImportArgs) -> Result<i32> {
         "Stored"
     };
     eprintln!(
-        "{verb} {} secrets in {} ({} were the same):",
-        stored.len(),
-        s.name(),
-        unchanged.len()
+        "{verb} {} secrets ({unchanged} were the same):",
+        stored.len()
     );
-    for n in &stored {
-        eprintln!("  {n}");
+    for (n, ss) in &stored {
+        eprintln!("  {n} ({})", ss.join(", "));
     }
     for a in &aliased {
         eprintln!("  alias {a}");

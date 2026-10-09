@@ -80,7 +80,7 @@ shared/openrouter/API_KEY
 ### Store a secret
 
 ```sh
-sealkeep set shared/openrouter/API_KEY -d "OpenRouter, the main account"
+sealkeep set shared/openrouter/API_KEY -d "OpenRouter, the main account"   # writes to every store
 ```
 
 sealkeep asks for the value two times, with no echo. To pipe a value in, use `--stdin`:
@@ -194,10 +194,10 @@ sealkeep store add-vault vault \
   --address 'http://127.0.0.1:{port}' --mount agent --auth kubernetes --role sealkeep \
   --jwt-command 'kubectl -n vault create token sealkeep --duration 10m' \
   --port-forward 'kubectl -n vault port-forward svc/vault {port}:8200'
-sealkeep sync --from local --to vault
+sealkeep sync --from local --to vault   # one time, for the secrets that are already in the keyring
 ```
 
-The Vault side needs a KV v2 mount, a policy with `create`, `read` and `update` on `agent/data/*` and `read`, `list` and `update` on `agent/metadata/*`, and a Kubernetes auth role bound to the ServiceAccount. With `--auth token`, sealkeep reads `$VAULT_TOKEN`, or the token that `sealkeep store token vault` keeps in the keyring.
+`set`, `import` and `mv` write to every store (a Vault store takes only names with a folder), so the stores stay the same. `--store NAME` writes to one store. The Vault side needs a KV v2 mount, a policy with `create`, `read` and `update` on `agent/data/*` and `read`, `list` and `update` on `agent/metadata/*`, and a Kubernetes auth role bound to the ServiceAccount. With `--auth token`, sealkeep reads `$VAULT_TOKEN`, or the token that `sealkeep store token vault` keeps in the keyring.
 
 ## SSH keys
 

@@ -473,12 +473,28 @@ fn set(
         bail!("`{name}` is an alias; set its target, or run `sealkeep alias rm {name}` first");
     }
     let stores = Stores::from_config(&cfg);
-    let s = stores.for_write(store)?;
+    let targets = stores.write_targets(store, name)?;
     let value = read_value(name, from_stdin, from_file)?;
-    s.set(name, &value, description)?;
-    record("set", vec![format!("{}:{name}", s.name())], None)?;
-    eprintln!("Stored {name} in {}.", s.name());
-    Ok(0)
+    let mut done = Vec::new();
+    let mut failed = false;
+    for s in targets {
+        match s.set(name, &value, description) {
+            Ok(()) => done.push(s.name().to_string()),
+            Err(e) => {
+                failed = true;
+                eprintln!("sealkeep: store {}: {e:#}", s.name());
+            }
+        }
+    }
+    if !done.is_empty() {
+        record(
+            "set",
+            done.iter().map(|s| format!("{s}:{name}")).collect(),
+            None,
+        )?;
+        eprintln!("Stored {name} in {}.", done.join(", "));
+    }
+    Ok(if failed { 1 } else { 0 })
 }
 
 fn mv(old: &str, new: &str, store: Option<&str>) -> Result<i32> {
@@ -496,6 +512,7 @@ fn mv(old: &str, new: &str, store: Option<&str>) -> Result<i32> {
         Some(s) => vec![stores.by_name(s)?],
         None => stores.stores.iter().map(|s| s.as_ref()).collect(),
     };
+    let mut moved_in = Vec::new();
     for s in candidates {
         let Some(value) = s.get(old)? else { continue };
         if s.get(new)?.is_some() {
@@ -508,28 +525,34 @@ fn mv(old: &str, new: &str, store: Option<&str>) -> Result<i32> {
             .and_then(|i| i.description);
         s.set(new, &value, desc.as_deref())?;
         s.remove(old)?;
-        let mut moved = 0;
-        for t in cfg.aliases.values_mut() {
-            if t == old {
-                *t = new.to_string();
-                moved += 1;
-            }
-        }
-        if moved > 0 {
-            cfg.save()?;
-        }
-        record(
-            "move",
-            vec![format!("{}:{old}", s.name()), format!("{}:{new}", s.name())],
-            None,
-        )?;
-        eprintln!(
-            "Moved {old} to {new} in {} ({moved} aliases follow it).",
-            s.name()
-        );
-        return Ok(0);
+        moved_in.push(s.name().to_string());
     }
-    bail!("no store has a secret `{old}`")
+    if moved_in.is_empty() {
+        bail!("no store has a secret `{old}`");
+    }
+    let mut follow = 0;
+    for t in cfg.aliases.values_mut() {
+        if t == old {
+            *t = new.to_string();
+            follow += 1;
+        }
+    }
+    if follow > 0 {
+        cfg.save()?;
+    }
+    record(
+        "move",
+        moved_in
+            .iter()
+            .flat_map(|s| [format!("{s}:{old}"), format!("{s}:{new}")])
+            .collect(),
+        None,
+    )?;
+    eprintln!(
+        "Moved {old} to {new} in {} ({follow} aliases follow it).",
+        moved_in.join(", ")
+    );
+    Ok(0)
 }
 
 fn rm(name: &str, store: Option<&str>) -> Result<i32> {
