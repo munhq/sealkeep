@@ -545,9 +545,10 @@ fn scan_cmd(
             );
         }
         for k in &f.keys {
+            let kind = k.kind.map(|x| format!(" ({x})")).unwrap_or_default();
             match k.group {
-                Some(g) => println!("  {:40} {:6} same value: group {g}", k.key, k.class),
-                None => println!("  {:40} {}", k.key, k.class),
+                Some(g) => println!("  {:40} {:6}{kind} same value: group {g}", k.key, k.class),
+                None => println!("  {:40} {}{kind}", k.key, k.class),
             }
         }
     }
