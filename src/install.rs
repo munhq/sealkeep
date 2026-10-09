@@ -142,6 +142,10 @@ fn read_json(path: &Path) -> Result<Value> {
 
 /// Change a JSON file with `f`. `f` returns `false` when no change is needed.
 fn edit_json(ctx: &Ctx, path: &Path, f: impl FnOnce(&mut Value) -> Result<bool>) -> Result<bool> {
+    // A config file that is a link to a shared file keeps its link: the write goes to
+    // the target.
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let path = resolved.as_path();
     let mut v = read_json(path)?;
     if !v.is_object() {
         bail!("{} is not a JSON object", path.display());
@@ -172,7 +176,8 @@ fn write_skill(ctx: &Ctx, skills_dir: &Path) -> Result<String> {
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
         std::fs::write(&file, SKILL).with_context(|| format!("write {}", file.display()))?;
     }
-    Ok(format!("wrote the skill to {}", dir.display()))
+    let verb = if ctx.dry_run { "would write" } else { "wrote" };
+    Ok(format!("{verb} the skill to {}", dir.display()))
 }
 
 fn guard_command(ctx: &Ctx, client: &str) -> String {
@@ -212,7 +217,8 @@ fn add_pretool_hook(ctx: &Ctx, path: &Path, matcher: &str, client: &str) -> Resu
         Ok(true)
     })?;
     Ok(if changed {
-        format!("added the guard hook to {}", path.display())
+        let verb = if ctx.dry_run { "would add" } else { "added" };
+        format!("{verb} the guard hook to {}", path.display())
     } else {
         format!("the guard hook is already in {}", path.display())
     })
@@ -369,6 +375,9 @@ fn cursor_mcp(ctx: &Ctx, add: bool) -> Result<String> {
         }
     })?;
     Ok(match (add, changed) {
+        (true, true) if ctx.dry_run => {
+            format!("would register the MCP server in {}", path.display())
+        }
         (true, true) => format!("registered the MCP server in {}", path.display()),
         (true, false) => "the MCP server is already registered".into(),
         (false, true) => format!("removed the MCP server from {}", path.display()),
@@ -639,6 +648,24 @@ mod tests {
         assert!(backups >= 1);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_config_keeps_its_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("shared.json");
+        std::fs::write(&target, "{}").unwrap();
+        let link = dir.path().join("settings.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        add_pretool_hook(&ctx(), &link, "Bash", "claude").unwrap();
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(std::fs::read_to_string(&target).unwrap().contains(MARK));
+    }
+
     #[test]
     fn dry_run_changes_nothing() {
         let dir = tempfile::tempdir().unwrap();
@@ -646,7 +673,7 @@ mod tests {
         let mut c = ctx();
         c.dry_run = true;
         let msg = add_pretool_hook(&c, &path, "Bash", "claude").unwrap();
-        assert!(msg.contains("added"));
+        assert!(msg.contains("would add"));
         assert!(!path.exists());
     }
 
