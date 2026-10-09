@@ -173,7 +173,7 @@ impl Server {
     }
 
     #[tool(
-        description = "Show each configured store and whether it can be used now (for example, whether a Proxium store is signed in).",
+        description = "Show each configured store and whether it can be used now (for example, whether the keyring is unlocked and Vault answers).",
         annotations(read_only_hint = true)
     )]
     async fn store_status(&self) -> Result<CallToolResult, ErrorData> {
