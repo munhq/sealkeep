@@ -19,8 +19,9 @@ const MAX_TIMEOUT_SECS: u64 = 900;
 const OUTPUT_LIMIT: usize = 100 * 1024;
 
 const INSTRUCTIONS: &str = "sealkeep runs commands with secrets that you never see. \
-Call list_secrets for the names. Call run_with_secrets with the command and the names: \
-each secret goes into the environment variable of the same name (or VAR=NAME to choose \
+Names are <scope>/<project>/<env>/<KEY>, for example shared/stripe/test/SECRET_KEY. \
+Call list_secrets for the names. Call run_with_secrets with the command and the folders or \
+names: each secret goes into the environment variable named by its KEY (or VAR=NAME to choose \
 the variable), and each value is replaced with [sealkeep:NAME] in the output. Refer to a \
 secret in the command as $NAME through a shell, for example \
 [\"sh\", \"-c\", \"curl -H \\\"Authorization: Bearer $API_KEY\\\" https://api.example.com\"]. \
@@ -31,13 +32,19 @@ pub struct ListArgs {
     /// Only this store. Leave out for every store.
     #[serde(default)]
     pub store: Option<String>,
+    /// Only this folder and below, for example personal/example-app/dev.
+    #[serde(default)]
+    pub folder: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RunArgs {
     /// The command and its arguments, for example ["sh", "-c", "curl -sS -H \"Authorization: Bearer $OPENROUTER_API_KEY\" https://openrouter.ai/api/v1/models"].
     pub command: Vec<String>,
-    /// The secrets for the environment: NAME, STORE:NAME, or VAR=NAME to set another variable.
+    /// Folders: every secret in each folder goes into the variable named by its key, for example "personal/example-app/dev".
+    #[serde(default)]
+    pub folders: Vec<String>,
+    /// Single secrets: NAME (the variable is its key), STORE:NAME, or VAR=NAME to choose the variable.
     #[serde(default)]
     pub secrets: Vec<String>,
     /// Secrets that go into a temporary dotenv file instead. The argument {dotenv} in the command becomes its path. The file is removed when the command ends.
@@ -96,6 +103,10 @@ impl Server {
             if let Some(s) = &args.store {
                 list.retain(|i| &i.store == s);
             }
+            if let Some(f) = &args.folder {
+                list.retain(|i| crate::names::under(&i.name, f));
+            }
+            list.sort_by(|a, b| a.name.cmp(&b.name));
             Ok(json!({ "secrets": list, "errors": errors }))
         })
         .await
@@ -122,9 +133,20 @@ impl Server {
                     .unwrap_or(DEFAULT_TIMEOUT_SECS)
                     .clamp(1, MAX_TIMEOUT_SECS),
             );
+            let mut env: Vec<Binding> = Vec::new();
+            for f in &args.folders {
+                for b in stores.folder_bindings(f.trim_end_matches('/'), None)? {
+                    env.retain(|x| x.var != b.var);
+                    env.push(b);
+                }
+            }
+            for b in parse_bindings(&args.secrets)? {
+                env.retain(|x| x.var != b.var);
+                env.push(b);
+            }
             let spec = RunSpec {
                 argv: args.command,
-                env: parse_bindings(&args.secrets)?,
+                env,
                 dotenv: parse_bindings(&args.dotenv)?,
                 cwd: args.cwd.map(PathBuf::from),
                 action: "mcp_run",

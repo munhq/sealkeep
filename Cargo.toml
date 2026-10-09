@@ -1,9 +1,9 @@
 [package]
 name = "sealkeep"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
-description = "Give AI agents the use of your secrets without the values: inject them into a command, redact them from its output, keep them in the OS keyring or a Proxium project."
+description = "Give AI agents the use of your secrets without the values: named secrets in the OS keyring (Vault as a replica), injected into a command and redacted from its output."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/munhq/sealkeep"
 readme = "README.md"

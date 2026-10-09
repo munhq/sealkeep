@@ -17,6 +17,52 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 /// text in the output, and such a value is not a credential.
 pub const MIN_REDACT_LEN: usize = 4;
 
+/// A value this long is redacted whatever its key is.
+const ALWAYS_REDACT_LEN: usize = 16;
+
+const SECRET_WORDS: &[&str] = &[
+    "KEY",
+    "TOKEN",
+    "SECRET",
+    "PASS",
+    "PWD",
+    "DSN",
+    "PRIVATE",
+    "CREDENTIAL",
+    "AUTH",
+    "SALT",
+    "COOKIE",
+    "SESSION",
+    "WEBHOOK",
+    "SIGNING",
+    "MNEMONIC",
+    "SEED",
+    "CERT",
+    "BEARER",
+];
+
+/// Whether a key names a secret.
+pub fn secret_key_name(key: &str) -> bool {
+    let k = key.to_ascii_uppercase();
+    SECRET_WORDS.iter().any(|w| k.contains(w))
+}
+
+/// `scheme://user:password@host`
+pub fn url_with_password(value: &str) -> bool {
+    value
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split_once('@'))
+        .is_some_and(|(userinfo, _)| userinfo.contains(':'))
+}
+
+/// Whether a value is redacted. A config value such as `PORT=3000` or
+/// `NODE_ENV=production` stays readable in the output.
+pub fn should_redact(name: &str, value: &str) -> bool {
+    let key = crate::names::key_of(name);
+    value.len() >= MIN_REDACT_LEN
+        && (secret_key_name(key) || url_with_password(value) || value.len() >= ALWAYS_REDACT_LEN)
+}
+
 #[derive(Debug, Clone)]
 pub struct Redactor {
     ac: Option<AhoCorasick>,
@@ -30,7 +76,7 @@ impl Redactor {
         let mut patterns: Vec<Vec<u8>> = Vec::new();
         let mut labels: Vec<Vec<u8>> = Vec::new();
         for (name, value) in secrets {
-            if value.len() < MIN_REDACT_LEN {
+            if !should_redact(name, value) {
                 continue;
             }
             let label = format!("[sealkeep:{name}]").into_bytes();
@@ -209,6 +255,20 @@ mod tests {
     }
 
     #[test]
+    fn config_values_stay_readable() {
+        let r = Redactor::new([
+            ("app/dev/PORT", "3000"),
+            ("app/dev/NODE_ENV", "production"),
+            ("app/dev/DATABASE_URL", "postgres://u:pw@h/db"),
+            ("app/dev/SIGNER", "0123456789abcdef0123"),
+        ]);
+        assert_eq!(
+            r.redact_str("3000 production postgres://u:pw@h/db 0123456789abcdef0123"),
+            "3000 production [sealkeep:app/dev/DATABASE_URL] [sealkeep:app/dev/SIGNER]"
+        );
+    }
+
+    #[test]
     fn short_values_pass_through() {
         let r = Redactor::new([("PIN", "123")]);
         assert!(r.is_empty());
@@ -217,7 +277,10 @@ mod tests {
 
     #[test]
     fn longest_match_wins() {
-        let r = Redactor::new([("A", "abcd"), ("B", "abcdefgh")]);
-        assert_eq!(r.redact_str("abcdefgh abcd"), "[sealkeep:B] [sealkeep:A]");
+        let r = Redactor::new([("A_KEY", "abcd"), ("B_KEY", "abcdefgh")]);
+        assert_eq!(
+            r.redact_str("abcdefgh abcd"),
+            "[sealkeep:B_KEY] [sealkeep:A_KEY]"
+        );
     }
 }

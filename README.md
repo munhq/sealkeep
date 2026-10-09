@@ -2,20 +2,22 @@
 
 sealkeep lets an AI agent use your secrets without seeing them.
 
+You keep each secret one time, under a name such as `shared/stripe/test/SECRET_KEY`. The agent finds the name with `sealkeep list`, and runs a command with it. It never reads the value, and it never has to ask you for one.
+
 The agent asks for a secret by its name. sealkeep puts the value into the environment of one command, runs the command, and replaces the value with `[sealkeep:NAME]` in all the output. The value does not go into the context, the transcript or a file.
 
 ```
 agent ──► sealkeep run OPENROUTER_API_KEY -- sh -c 'curl -H "Authorization: Bearer $OPENROUTER_API_KEY" …'
               │
               ├─ reads the value from a store ──► OS keyring  (macOS Keychain, Secret Service, Windows Credential Manager)
-              │                               └─► Proxium project (sealed on the server, each read logged)
+              │                               └─► Vault KV v2 (a replica)
               ├─ starts the command with the value in its environment
               └─ redacts the value from stdout and stderr ──► agent sees [sealkeep:OPENROUTER_API_KEY]
 ```
 
 It has four parts:
 
-1. **A CLI** (`sealkeep`): `set`, `list`, `run`, `import` and the store commands.
+1. **A CLI** (`sealkeep`): `set`, `list`, `run`, `import`, `scan`, `sync`, aliases and the store commands.
 2. **An MCP server** (`sealkeep mcp`): the tools `list_secrets`, `run_with_secrets` and `store_status`. No tool returns a value.
 3. **A guard hook** (`sealkeep guard`): it refuses the tool calls that would print a secret, for example `cat .env` or `sealkeep get`.
 4. **A skill** that tells the agent when and how to use the CLI.
@@ -49,45 +51,79 @@ Options: `--client claude,codex` installs into the named clients only. `--dry-ru
 
 Run `sealkeep doctor` to check the stores and the clients.
 
-## Use it
+## Names
+
+A name is `<scope>/<project>/<env>/<KEY>`:
+
+| Part | Values | Example |
+|---|---|---|
+| scope | Who owns the secret: `personal`, the name of an employer or a client, or `shared` for one account that several scopes use | `personal`, `acme`, `shared` |
+| project | The repository or the service | `example-app`, `stripe`, `ovh` |
+| env | `prod`, `dev`, `test`, `local`. Leave it out when the secret has no environment (the API key of an account) | `prod` |
+| KEY | The environment variable that the program reads | `DATABASE_URL` |
+
+Folders are lower case (`a-z`, `0-9`, `.`, `_`, `-`). The key is upper case (`A-Z`, `0-9`, `_`) and is the variable that `run` sets.
+
+```
+personal/example-app/prod/DATABASE_URL
+personal/example-app/dev/DATABASE_URL
+personal/example-app/dev/STRIPE_SECRET_KEY   -> shared/stripe/test/SECRET_KEY   (alias)
+acme/ovh/ovh-eu/APPLICATION_KEY
+acme/cloudflare/API_TOKEN
+shared/stripe/test/SECRET_KEY
+shared/openrouter/API_KEY
+```
+
+**One value, one name.** When two projects use the same account, store the value one time under `shared/…`, and make an alias in each project folder. The project folder then has every variable that the project needs, and a rotation changes one value.
+
 
 ### Store a secret
 
 ```sh
-sealkeep set OPENROUTER_API_KEY -d "OpenRouter, personal account"
+sealkeep set shared/openrouter/API_KEY -d "OpenRouter, the main account"
 ```
 
 sealkeep asks for the value two times, with no echo. To pipe a value in, use `--stdin`:
 
 ```sh
-some-password-tool show openrouter | sealkeep set OPENROUTER_API_KEY --stdin
+some-password-tool show openrouter | sealkeep set shared/openrouter/API_KEY --stdin
 ```
 
-A name is an environment variable name: `A-Z`, `0-9` and `_`, and it starts with a letter.
 
-To copy the entries of a `.env` file:
+To find the secrets on a machine, run `scan`. It prints the path of each `.env` file, its key names, a class for each key (`secret`, `config` or `empty`), and a group number for each value that is in more than one place. It never prints a value. It also lists other files that often hold a credential, by path only:
 
 ```sh
-sealkeep import ../example-app/.env --prefix EXAMPLE_APP_
+sealkeep scan ~/code --max-depth 4
 ```
 
-`import` prints the names only. After the import, delete the `.env` file or keep it out of the reach of the agent.
+To copy a file into a folder:
+
+```sh
+sealkeep import ../example-app/.env --to personal/example-app/dev \
+  --map STRIPE_SECRET_KEY=shared/stripe/test/SECRET_KEY
+sealkeep import ~/.ovh.conf --to acme/ovh            # INI: one folder for each section
+sealkeep set personal/github/PAT --from-file ~/.github-token
+```
+
+`import` reads dotenv files, and INI files (`.ini`, `.conf`, AWS `credentials`). It prints the names only. `--map KEY=NAME` stores the value at NAME and makes the project key an alias of it. If NAME already has a different value, `import` stops and says so. After the import, delete the source file, or keep it out of the reach of the agent.
 
 ### Let the agent use it
 
 Tell the agent what to do. The skill tells it to run `sealkeep list` for the names, and `sealkeep run` for the command:
 
 ```sh
-sealkeep run OPENROUTER_API_KEY -- sh -c 'curl -sS -H "Authorization: Bearer $OPENROUTER_API_KEY" https://openrouter.ai/api/v1/key'
-sealkeep run -e GITHUB_TOKEN=GH_PAT -- gh api user
+sealkeep run shared/openrouter/API_KEY -- sh -c 'curl -sS -H "Authorization: Bearer $API_KEY" https://openrouter.ai/api/v1/key'
+sealkeep run --all personal/example-app/dev -- npm run dev
+sealkeep run -e GITHUB_TOKEN=personal/github/PAT -- gh api user
 ```
 
-`-e VAR=NAME` sets a variable with a different name. `STORE:NAME` reads from one store only.
+A name sets the variable named by its key. `--all FOLDER` sets one variable for each secret in the folder and below, the same as a `.env` file. Two secrets with the same key in one `--all` are an error. `-e VAR=NAME` sets a variable with a different name. `STORE:NAME` reads from one store only.
 
 For a tool that reads its secrets from a file, `--dotenv` writes a temporary file that only you can read. The file is in `$XDG_RUNTIME_DIR/sealkeep` when it exists. sealkeep puts the path where the command has `{dotenv}`, and it removes the file when the command ends. This example gives Playwright MCP the login of a test account. The agent types the name `ADMIN_PASSWORD`, and Playwright puts in the value:
 
 ```sh
-sealkeep run --dotenv ADMIN_EMAIL --dotenv ADMIN_PASSWORD -- npx @playwright/mcp@latest --secrets {dotenv}
+sealkeep run --dotenv personal/example-app/dev/ADMIN_EMAIL --dotenv personal/example-app/dev/ADMIN_PASSWORD \
+  -- npx @playwright/mcp@latest --secrets {dotenv}
 ```
 
 `--secrets <path>` is an option of `@playwright/mcp` (see its README).
@@ -95,7 +131,7 @@ sealkeep run --dotenv ADMIN_EMAIL --dotenv ADMIN_PASSWORD -- npx @playwright/mcp
 ### See a value yourself
 
 ```sh
-sealkeep get OPENROUTER_API_KEY
+sealkeep get shared/openrouter/API_KEY
 ```
 
 `get` works only when stdin and stdout are a terminal. An agent runs commands without a terminal, so `get` refuses, and the guard hook also refuses it.
@@ -112,10 +148,17 @@ name = "local"
 kind = "keyring"
 
 [[store]]
-name = "team"
-kind = "proxium"
-url = "https://proxium.tech"
-project = "acme"
+name = "vault"
+kind = "vault"
+address = "http://127.0.0.1:{port}"
+mount = "agent"
+auth = "kubernetes"
+role = "sealkeep"
+jwt_command = ["kubectl", "-n", "vault", "create", "token", "sealkeep", "--duration", "10m"]
+port_forward = ["kubectl", "-n", "vault", "port-forward", "svc/vault", "{port}:8200"]
+
+[aliases]
+"personal/example-app/dev/STRIPE_SECRET_KEY" = "shared/stripe/test/SECRET_KEY"
 
 [guard]
 block_dotenv = true
@@ -140,17 +183,21 @@ sealkeep unlock
 
 It asks for the password of the login keyring and gives it to `gnome-keyring-daemon --unlock`. Each keyring call waits at most 30 seconds (`SEALKEEP_KEYRING_TIMEOUT`), so an agent gets an error, and the call does not hang.
 
-### A Proxium project
+### Vault as a replica
 
-[Proxium](https://proxium.tech) keeps the secrets of a project on the server. It seals each value with the data key of the project, and it logs each read with the person, the version and the purpose. The members of the project can read a value, and only the owners can change one.
+A Vault (or OpenBao) KV v2 mount can hold a copy of the keyring, for a second machine or a backup. Each folder is one KV secret, and each key is one field of it: `shared/stripe/test/SECRET_KEY` is the field `SECRET_KEY` of `agent/shared/stripe/test`. The `custom_metadata` of each secret lists its keys and their descriptions, so `list` reads no value.
+
+For a Vault inside Kubernetes, sealkeep can reach it through the Kubernetes API with a port forward, and log in with a short-lived ServiceAccount token. The machine then keeps no Vault token:
 
 ```sh
-sealkeep store add-proxium team --url https://proxium.tech --project acme
-sealkeep login team          # device sign-in: approve the code in the browser
-sealkeep set STRIPE_SECRET_KEY --store team
+sealkeep store add-vault vault \
+  --address 'http://127.0.0.1:{port}' --mount agent --auth kubernetes --role sealkeep \
+  --jwt-command 'kubectl -n vault create token sealkeep --duration 10m' \
+  --port-forward 'kubectl -n vault port-forward svc/vault {port}:8200'
+sealkeep sync --from local --to vault
 ```
 
-`login` keeps the session token in the OS keyring. For each call, sealkeep exchanges it for a token that is valid for 15 minutes. The purpose of each read is the command line that `run` starts, so the log of the project shows what each read was for.
+The Vault side needs a KV v2 mount, a policy with `create`, `read` and `update` on `agent/data/*` and `read`, `list` and `update` on `agent/metadata/*`, and a Kubernetes auth role bound to the ServiceAccount. With `--auth token`, sealkeep reads `$VAULT_TOKEN`, or the token that `sealkeep store token vault` keeps in the keyring.
 
 ## MCP
 
@@ -158,8 +205,8 @@ sealkeep set STRIPE_SECRET_KEY --store team
 
 | Tool | What it does |
 |---|---|
-| `list_secrets` | The names, stores and descriptions. |
-| `run_with_secrets` | Runs `command` (a list of arguments, with no shell) with `secrets` in the environment and `dotenv` in a temporary file. Returns the exit code, stdout and stderr, redacted. The time limit is 120 s by default and 900 s at most. Each stream is cut at 100 KiB. |
+| `list_secrets` | The names, stores and descriptions, for all names or one `folder`. |
+| `run_with_secrets` | Runs `command` (a list of arguments, with no shell) with `folders` and `secrets` in the environment and `dotenv` in a temporary file. Returns the exit code, stdout and stderr, redacted. The time limit is 120 s by default and 900 s at most. Each stream is cut at 100 KiB. |
 | `store_status` | Whether each store can be used now. |
 
 ## The guard hook
@@ -173,9 +220,9 @@ The hook refuses these tool calls, and it tells the agent to use `sealkeep run`:
 
 ## What sealkeep protects, and what it does not
 
-sealkeep keeps secrets out of the context of the agent, out of the transcript and out of the files of the project. Each use goes into the audit log (`~/.local/share/sealkeep/audit.jsonl` on Linux, or `$SEALKEEP_AUDIT_LOG`), with the names and the command and never a value. A Proxium store also logs each read on the server.
+sealkeep keeps secrets out of the context of the agent, out of the transcript and out of the files of the project. Each use goes into the audit log (`~/.local/share/sealkeep/audit.jsonl` on Linux, or `$SEALKEEP_AUDIT_LOG`), with the names and the command and never a value.
 
-Redaction matches the value, its JSON-escaped form, its percent-encoded form and its base64 forms. A value that is shorter than 4 characters is not redacted. A command that transforms a value in another way (for example, a hash or a part of the value) can print it in a form that sealkeep does not match.
+Redaction matches the value, its JSON-escaped form, its percent-encoded form and its base64 forms. A value is redacted when its key looks like a secret (`KEY`, `TOKEN`, `SECRET`, `PASS`, `AUTH` and similar words), when it is a URL with a password, or when it has 16 characters or more. A config value such as `PORT=3000` stays readable. A value that is shorter than 4 characters is not redacted. A command that transforms a value in another way (for example, a hash or a part of the value) can print it in a form that sealkeep does not match.
 
 An agent that can run any shell command as your user can read what your user can read. sealkeep does not change that. It makes the safe path the easy one, it refuses the common paths to a value, and it records each use. Give an agent keys with a small scope: a restricted Stripe key, an OpenRouter key with a spend limit, a test account for a web login.
 

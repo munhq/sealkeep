@@ -3,18 +3,21 @@
 mod audit;
 mod config;
 mod guard;
+mod import;
 mod install;
 mod mcp;
 mod names;
 mod redact;
 mod run;
+mod scan;
 mod store;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use config::{Config, StoreConfig};
+use config::{Config, StoreConfig, VaultAuth};
 use names::Binding;
 use std::io::{IsTerminal, Read};
+use std::path::PathBuf;
 use store::Stores;
 
 #[derive(Parser)]
@@ -22,8 +25,9 @@ use store::Stores;
     name = "sealkeep",
     version,
     about = "Give AI agents the use of your secrets without the values",
-    long_about = "sealkeep keeps secrets in the OS keyring or in a Proxium project. `sealkeep run` gives \
-secrets to a command and redacts them from its output, so an AI agent can use a secret that it never sees."
+    long_about = "sealkeep keeps secrets in the OS keyring, with Vault as a replica. `sealkeep run` gives \
+secrets to a command and redacts them from its output, so an AI agent can use a secret that it never sees.\n\n\
+Names: <scope>/<project>/<env>/<KEY>, for example shared/stripe/test/SECRET_KEY."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -32,14 +36,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Show the secret names, their store and description. Never a value.
+    /// Show the secret names (in FOLDER, when given), their store and description. Never a value.
     List {
+        folder: Option<String>,
         #[arg(long)]
         store: Option<String>,
         #[arg(long)]
         json: bool,
     },
-    /// Store a secret. The value comes from a hidden prompt, or from stdin with --stdin.
+    /// Store a secret. The value comes from a hidden prompt, from stdin (--stdin) or from a file (--from-file).
     Set {
         name: String,
         #[arg(long)]
@@ -47,8 +52,11 @@ enum Cmd {
         #[arg(short, long)]
         description: Option<String>,
         /// Read the value from stdin (one trailing line break is removed).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "from_file")]
         stdin: bool,
+        /// Read the value from a file (one trailing line break is removed).
+        #[arg(long)]
+        from_file: Option<PathBuf>,
     },
     /// Remove a secret.
     Rm {
@@ -64,52 +72,64 @@ enum Cmd {
     },
     /// Run a command with secrets in its environment, and redact them from its output.
     #[command(
-        after_help = "Examples:\n  sealkeep run OPENROUTER_API_KEY -- sh -c 'curl -H \"Authorization: Bearer $OPENROUTER_API_KEY\" https://openrouter.ai/api/v1/key'\n  sealkeep run -e GITHUB_TOKEN=GH_PAT -- gh api user\n  sealkeep run --dotenv ADMIN_PASSWORD -- npx @playwright/mcp@latest --secrets {dotenv}"
+        after_help = "Examples:\n  sealkeep run shared/openrouter/API_KEY -- sh -c 'curl -H \"Authorization: Bearer $API_KEY\" https://openrouter.ai/api/v1/key'\n  sealkeep run --all personal/example-app/dev -- npm run dev\n  sealkeep run -e GITHUB_TOKEN=personal/github/PAT -- gh api user\n  sealkeep run --dotenv ADMIN_PASSWORD=personal/example-app/dev/ADMIN_PASSWORD -- npx @playwright/mcp@latest --secrets {dotenv}"
     )]
     Run {
+        /// Every secret in FOLDER and below, each in the variable named by its key.
+        #[arg(long = "all", value_name = "FOLDER")]
+        all: Vec<String>,
+        /// Read --all folders from this store only.
+        #[arg(long)]
+        store: Option<String>,
         /// Set VAR to the secret NAME (or STORE:NAME).
         #[arg(short = 'e', long = "env", value_name = "VAR=NAME")]
         env: Vec<String>,
         /// Put the secret in a temporary dotenv file; {dotenv} in the command becomes its path.
         #[arg(long, value_name = "[VAR=]NAME")]
         dotenv: Vec<String>,
-        /// Secrets for the variables of the same name.
+        /// Secrets for the variables named by their keys.
         #[arg(value_name = "NAME")]
         secrets: Vec<String>,
         /// The command, after `--`.
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
-    /// Copy the entries of a dotenv file into a store. Prints the names only.
-    Import {
-        file: std::path::PathBuf,
+    /// Copy the entries of a dotenv or INI file into a folder. Prints the names only.
+    Import(import::ImportArgs),
+    /// Find the dotenv files and credential files under folders. Prints paths, key names
+    /// and groups of keys with the same value. Never a value.
+    Scan {
+        roots: Vec<PathBuf>,
+        #[arg(long, default_value_t = 6)]
+        max_depth: usize,
+        /// Leave out paths that contain this text.
         #[arg(long)]
-        store: Option<String>,
-        /// Only these keys (comma-separated).
-        #[arg(long, value_delimiter = ',')]
-        only: Vec<String>,
-        /// Add this prefix to each name, for example APP_.
-        #[arg(long, default_value = "")]
-        prefix: String,
-        /// The description for each imported secret.
-        #[arg(short, long)]
-        description: Option<String>,
+        exclude: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Copy the secrets of one store to another (for example the keyring to Vault).
+    Sync {
+        #[arg(long)]
+        from: String,
+        #[arg(long)]
+        to: String,
+        /// Only this folder and below.
+        #[arg(long)]
+        folder: Option<String>,
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Manage aliases: a name in a project folder that points to a shared secret.
+    Alias {
+        #[command(subcommand)]
+        cmd: AliasCmd,
     },
     /// Manage the stores in the config file.
     Store {
         #[command(subcommand)]
         cmd: StoreCmd,
     },
-    /// Sign in to a Proxium store (device flow).
-    Login {
-        store: String,
-        #[arg(long)]
-        no_browser: bool,
-    },
-    /// Remove the Proxium session of a store from the keyring.
-    Logout { store: String },
     /// Serve the MCP tools on stdio.
     Mcp,
     /// The pre-tool hook for AI clients (reads the hook JSON on stdin).
@@ -151,6 +171,16 @@ enum Cmd {
 }
 
 #[derive(Subcommand)]
+enum AliasCmd {
+    /// Make NAME point to TARGET.
+    Add { name: String, target: String },
+    /// Remove an alias. The target stays.
+    Rm { name: String },
+    /// Show the aliases.
+    List,
+}
+
+#[derive(Subcommand)]
 enum StoreCmd {
     /// Show the stores, in lookup order.
     List,
@@ -160,18 +190,37 @@ enum StoreCmd {
         #[arg(long, default_value = config::DEFAULT_KEYRING_SERVICE)]
         service: String,
     },
-    /// Add a Proxium project as a store.
-    AddProxium {
+    /// Add a Vault KV v2 mount as a store.
+    AddVault {
         name: String,
+        /// The address; `{port}` is the local port of --port-forward.
         #[arg(long)]
-        url: String,
+        address: String,
+        #[arg(long, default_value = "agent")]
+        mount: String,
+        #[arg(long, value_enum, default_value = "kubernetes")]
+        auth: AuthArg,
         #[arg(long)]
-        project: String,
-        #[arg(long, default_value = config::DEFAULT_PROXIUM_CLIENT_ID)]
-        client_id: String,
+        role: Option<String>,
+        #[arg(long, default_value = "kubernetes")]
+        k8s_auth_mount: String,
+        /// The command that prints a ServiceAccount JWT, as one shell-split string.
+        #[arg(long)]
+        jwt_command: Option<String>,
+        /// The command that forwards {port} to Vault, as one shell-split string.
+        #[arg(long)]
+        port_forward: Option<String>,
     },
+    /// Store the Vault token of a store (token auth) in the keyring. Reads stdin or a prompt.
+    Token { store: String },
     /// Remove a store from the config. Its secrets stay where they are.
     Remove { name: String },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum AuthArg {
+    Token,
+    Kubernetes,
 }
 
 fn main() {
@@ -187,39 +236,49 @@ fn main() {
 
 fn dispatch(cmd: Cmd) -> Result<i32> {
     match cmd {
-        Cmd::List { store, json } => list(store, json),
+        Cmd::List {
+            folder,
+            store,
+            json,
+        } => list(folder.as_deref(), store, json),
         Cmd::Set {
             name,
             store,
             description,
             stdin,
-        } => set(&name, store.as_deref(), description.as_deref(), stdin),
+            from_file,
+        } => set(
+            &name,
+            store.as_deref(),
+            description.as_deref(),
+            stdin,
+            from_file.as_deref(),
+        ),
         Cmd::Rm { name, store } => rm(&name, store.as_deref()),
         Cmd::Get { name, store } => get(&name, store.as_deref()),
         Cmd::Run {
+            all,
+            store,
             env,
             dotenv,
             secrets,
             command,
-        } => run_cmd(env, dotenv, secrets, command),
-        Cmd::Import {
-            file,
-            store,
-            only,
-            prefix,
-            description,
+        } => run_cmd(all, store, env, dotenv, secrets, command),
+        Cmd::Import(args) => import::run(args),
+        Cmd::Scan {
+            roots,
+            max_depth,
+            exclude,
+            json,
+        } => scan_cmd(roots, max_depth, exclude, json),
+        Cmd::Sync {
+            from,
+            to,
+            folder,
             dry_run,
-        } => import(
-            &file,
-            store.as_deref(),
-            &only,
-            &prefix,
-            description.as_deref(),
-            dry_run,
-        ),
+        } => sync(&from, &to, folder.as_deref(), dry_run),
+        Cmd::Alias { cmd } => alias_cmd(cmd),
         Cmd::Store { cmd } => store_cmd(cmd),
-        Cmd::Login { store, no_browser } => login(&store, !no_browser),
-        Cmd::Logout { store } => logout(&store),
         Cmd::Mcp => mcp::serve().map(|_| 0),
         Cmd::Guard { client } => Ok(guard_cmd(client)),
         Cmd::Install {
@@ -254,16 +313,22 @@ fn dispatch(cmd: Cmd) -> Result<i32> {
     }
 }
 
-fn stores() -> Result<Stores> {
+pub fn stores() -> Result<Stores> {
     Ok(Stores::from_config(&Config::load()?))
 }
 
-fn list(store: Option<String>, as_json: bool) -> Result<i32> {
+fn list(folder: Option<&str>, store: Option<String>, as_json: bool) -> Result<i32> {
+    if let Some(f) = folder {
+        names::check_prefix(f.trim_end_matches('/'))?;
+    }
     let stores = stores()?;
     let (mut items, errors) = match &store {
         Some(s) => (stores.by_name(s)?.list()?, Vec::new()),
         None => stores.list_all(),
     };
+    if let Some(f) = folder {
+        items.retain(|i| names::under(&i.name, f));
+    }
     items.sort_by(|a, b| a.name.cmp(&b.name).then(a.store.cmp(&b.store)));
     if as_json {
         let v = serde_json::json!({"secrets": items, "errors": errors});
@@ -278,7 +343,10 @@ fn list(store: Option<String>, as_json: bool) -> Result<i32> {
             .max(5);
         println!("{:w$}  {:sw$}  DESCRIPTION", "NAME", "STORE");
         for i in &items {
-            let d = i.description.as_deref().unwrap_or("");
+            let d = match &i.alias_of {
+                Some(t) => format!("-> {t}"),
+                None => i.description.clone().unwrap_or_default(),
+            };
             println!("{:w$}  {:sw$}  {d}", i.name, i.store);
         }
         for e in &errors {
@@ -288,20 +356,27 @@ fn list(store: Option<String>, as_json: bool) -> Result<i32> {
     Ok(if errors.is_empty() { 0 } else { 1 })
 }
 
-fn read_value(name: &str, from_stdin: bool) -> Result<String> {
-    let value = if from_stdin {
+/// Remove one trailing line break.
+pub fn trim_newline(mut s: String) -> String {
+    if s.ends_with('\n') {
+        s.pop();
+        if s.ends_with('\r') {
+            s.pop();
+        }
+    }
+    s
+}
+
+fn read_value(name: &str, from_stdin: bool, from_file: Option<&std::path::Path>) -> Result<String> {
+    let value = if let Some(p) = from_file {
+        trim_newline(std::fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?)
+    } else if from_stdin {
         let mut s = String::new();
         std::io::stdin().read_to_string(&mut s)?;
-        if s.ends_with('\n') {
-            s.pop();
-            if s.ends_with('\r') {
-                s.pop();
-            }
-        }
-        s
+        trim_newline(s)
     } else {
         if !std::io::stdin().is_terminal() {
-            bail!("stdin is not a terminal; use --stdin to read the value from stdin");
+            bail!("stdin is not a terminal; use --stdin or --from-file");
         }
         let a = rpassword::prompt_password(format!("Value for {name}: "))?;
         let b = rpassword::prompt_password("The same value again: ")?;
@@ -322,7 +397,7 @@ fn read_value(name: &str, from_stdin: bool) -> Result<String> {
     Ok(value)
 }
 
-fn record(action: &'static str, secrets: Vec<String>, command: Option<String>) -> Result<()> {
+pub fn record(action: &'static str, secrets: Vec<String>, command: Option<String>) -> Result<()> {
     audit::record(&audit::Event {
         at: audit::now(),
         action,
@@ -338,11 +413,16 @@ fn set(
     store: Option<&str>,
     description: Option<&str>,
     from_stdin: bool,
+    from_file: Option<&std::path::Path>,
 ) -> Result<i32> {
     names::check(name)?;
-    let stores = stores()?;
+    let cfg = Config::load()?;
+    if cfg.aliases.contains_key(name) {
+        bail!("`{name}` is an alias; set its target, or run `sealkeep alias rm {name}` first");
+    }
+    let stores = Stores::from_config(&cfg);
     let s = stores.for_write(store)?;
-    let value = read_value(name, from_stdin)?;
+    let value = read_value(name, from_stdin, from_file)?;
     s.set(name, &value, description)?;
     record("set", vec![format!("{}:{name}", s.name())], None)?;
     eprintln!("Stored {name} in {}.", s.name());
@@ -356,14 +436,18 @@ fn rm(name: &str, store: Option<&str>) -> Result<i32> {
         Some(s) => vec![stores.by_name(s)?],
         None => stores.stores.iter().map(|s| s.as_ref()).collect(),
     };
+    let mut removed = Vec::new();
     for s in targets {
         if s.remove(name)? {
-            record("remove", vec![format!("{}:{name}", s.name())], None)?;
-            eprintln!("Removed {name} from {}.", s.name());
-            return Ok(0);
+            removed.push(format!("{}:{name}", s.name()));
         }
     }
-    bail!("no store has a secret `{name}`")
+    if removed.is_empty() {
+        bail!("no store has a secret `{name}`");
+    }
+    record("remove", removed.clone(), None)?;
+    eprintln!("Removed {}.", removed.join(", "));
+    Ok(0)
 }
 
 fn get(name: &str, store: Option<&str>) -> Result<i32> {
@@ -378,21 +462,30 @@ fn get(name: &str, store: Option<&str>) -> Result<i32> {
         name: name.to_string(),
     };
     let stores = stores()?;
-    let v = stores
-        .resolve(std::slice::from_ref(&r), "get: printed at a terminal")?
-        .remove(0);
+    let v = stores.resolve(std::slice::from_ref(&r))?.remove(0);
     record("get", vec![format!("{}:{name}", v.store)], None)?;
     println!("{}", v.value);
     Ok(0)
 }
 
 fn run_cmd(
+    all: Vec<String>,
+    store: Option<String>,
     env: Vec<String>,
     dotenv: Vec<String>,
     secrets: Vec<String>,
     command: Vec<String>,
 ) -> Result<i32> {
-    let mut bindings: Vec<Binding> = secrets
+    let stores = stores()?;
+    // Folders first, then single names, so a single name can replace one folder entry.
+    let mut bindings: Vec<Binding> = Vec::new();
+    for f in &all {
+        for b in stores.folder_bindings(f.trim_end_matches('/'), store.as_deref())? {
+            bindings.retain(|x| x.var != b.var);
+            bindings.push(b);
+        }
+    }
+    let mut single: Vec<Binding> = secrets
         .iter()
         .map(|s| Binding::parse(s))
         .collect::<Result<_>>()?;
@@ -400,14 +493,18 @@ fn run_cmd(
         if !e.contains('=') {
             bail!("-e needs VAR=NAME, got `{e}`");
         }
-        bindings.push(Binding::parse(e)?);
+        single.push(Binding::parse(e)?);
+    }
+    for b in single {
+        bindings.retain(|x| x.var != b.var);
+        bindings.push(b);
     }
     let dotenv: Vec<Binding> = dotenv
         .iter()
         .map(|s| Binding::parse(s))
         .collect::<Result<_>>()?;
     let prepared = run::prepare(
-        &stores()?,
+        &stores,
         run::RunSpec {
             argv: command,
             env: bindings,
@@ -419,57 +516,133 @@ fn run_cmd(
     prepared.run_streamed()
 }
 
-fn import(
-    file: &std::path::Path,
-    store: Option<&str>,
-    only: &[String],
-    prefix: &str,
-    description: Option<&str>,
-    dry_run: bool,
+fn scan_cmd(
+    roots: Vec<PathBuf>,
+    max_depth: usize,
+    exclude: Vec<String>,
+    json: bool,
 ) -> Result<i32> {
+    let roots = if roots.is_empty() {
+        vec![std::env::current_dir()?]
+    } else {
+        roots
+    };
+    let report = scan::scan(&roots, &scan::Options { max_depth, exclude })?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(0);
+    }
+    for f in &report.dotenv_files {
+        println!("{}", f.path);
+        if let Some(e) = &f.error {
+            println!("  (not parsed: {e})");
+        }
+        for k in &f.keys {
+            match k.group {
+                Some(g) => println!("  {:40} {:6} same value: group {g}", k.key, k.class),
+                None => println!("  {:40} {}", k.key, k.class),
+            }
+        }
+    }
+    if !report.groups.is_empty() {
+        println!("\nGroups of keys with the same value:");
+        for (i, g) in report.groups.iter().enumerate() {
+            println!("  group {}: {}", i + 1, g.join(", "));
+        }
+    }
+    if !report.other_files.is_empty() {
+        println!("\nOther files that can hold a credential (not read):");
+        for p in &report.other_files {
+            println!("  {p}");
+        }
+    }
+    Ok(0)
+}
+
+fn sync(from: &str, to: &str, folder: Option<&str>, dry_run: bool) -> Result<i32> {
+    if from == to {
+        bail!("--from and --to name the same store");
+    }
+    if let Some(f) = folder {
+        names::check_prefix(f)?;
+    }
     let stores = stores()?;
-    let s = stores.for_write(store)?;
-    let iter = dotenvy::from_path_iter(file).with_context(|| format!("read {}", file.display()))?;
-    let desc = description.map(str::to_string).unwrap_or_else(|| {
-        let f = file
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        format!("imported from {f}")
-    });
-    let mut imported = Vec::new();
-    let mut skipped = Vec::new();
-    for item in iter {
-        let (key, value) = item.with_context(|| format!("parse {}", file.display()))?;
-        if !only.is_empty() && !only.iter().any(|o| o == &key) {
+    let src = stores.by_name(from)?;
+    let dst = stores.by_name(to)?;
+    let mut items = src.list()?;
+    if let Some(f) = folder {
+        items.retain(|i| names::under(&i.name, f));
+    }
+    items.sort_by(|a, b| a.name.cmp(&b.name));
+    let (mut copied, mut same, mut skipped) = (Vec::new(), 0usize, Vec::new());
+    for i in &items {
+        if names::folder_of(&i.name).is_empty() && dst.kind() == "vault" {
+            skipped.push(format!("{} (Vault needs a folder)", i.name));
             continue;
         }
-        let name = format!("{prefix}{key}");
-        if !names::valid(&name) {
-            skipped.push(format!("{key} (the name `{name}` is not valid)"));
+        let Some(value) = src.get(&i.name)? else {
+            skipped.push(format!("{} (listed, but has no value)", i.name));
             continue;
-        }
-        if value.is_empty() {
-            skipped.push(format!("{key} (empty)"));
+        };
+        if dst.get(&i.name)?.as_deref() == Some(value.as_str()) {
+            same += 1;
             continue;
         }
         if !dry_run {
-            s.set(&name, &value, Some(&desc))?;
+            dst.set(&i.name, &value, i.description.as_deref())?;
         }
-        imported.push(format!("{}:{name}", s.name()));
+        copied.push(i.name.clone());
     }
-    if !dry_run && !imported.is_empty() {
-        record("import", imported.clone(), Some(file.display().to_string()))?;
+    if !dry_run && !copied.is_empty() {
+        record(
+            "sync",
+            copied.iter().map(|n| format!("{to}:{n}")).collect(),
+            Some(format!("from {from}")),
+        )?;
     }
-    let verb = if dry_run { "Would import" } else { "Imported" };
-    eprintln!("{verb} {} secrets into {}:", imported.len(), s.name());
-    for n in &imported {
+    let verb = if dry_run { "Would copy" } else { "Copied" };
+    eprintln!(
+        "{verb} {} secrets from {from} to {to}; {same} were the same.",
+        copied.len()
+    );
+    for n in &copied {
         eprintln!("  {n}");
     }
-    for k in &skipped {
-        eprintln!("  skipped {k}");
+    for s in &skipped {
+        eprintln!("  skipped {s}");
     }
     Ok(0)
+}
+
+fn alias_cmd(cmd: AliasCmd) -> Result<i32> {
+    let mut cfg = Config::load()?;
+    match cmd {
+        AliasCmd::List => {
+            for (a, t) in &cfg.aliases {
+                println!("{a} -> {t}");
+            }
+            return Ok(0);
+        }
+        AliasCmd::Add { name, target } => {
+            names::check(&name)?;
+            names::check(&target)?;
+            cfg.aliases.insert(name.clone(), target.clone());
+            cfg.save()?;
+            eprintln!("{name} -> {target}");
+        }
+        AliasCmd::Rm { name } => {
+            if cfg.aliases.remove(&name).is_none() {
+                bail!("no alias `{name}`");
+            }
+            cfg.save()?;
+            eprintln!("Removed the alias {name}.");
+        }
+    }
+    Ok(0)
+}
+
+fn split_command(s: &str) -> Vec<String> {
+    s.split_whitespace().map(str::to_string).collect()
 }
 
 fn store_cmd(cmd: StoreCmd) -> Result<i32> {
@@ -481,11 +654,13 @@ fn store_cmd(cmd: StoreCmd) -> Result<i32> {
                     StoreConfig::Keyring { name, service } => {
                         println!("{name}  keyring  service={service}")
                     }
-                    StoreConfig::Proxium {
-                        name, url, project, ..
-                    } => {
-                        println!("{name}  proxium  {url} project={project}")
-                    }
+                    StoreConfig::Vault {
+                        name,
+                        address,
+                        mount,
+                        auth,
+                        ..
+                    } => println!("{name}  vault  {address} mount={mount} auth={auth:?}"),
                 }
             }
             eprintln!("(config: {})", config::path()?.display());
@@ -494,19 +669,47 @@ fn store_cmd(cmd: StoreCmd) -> Result<i32> {
         StoreCmd::AddKeyring { name, service } => {
             cfg.stores.push(StoreConfig::Keyring { name, service })
         }
-        StoreCmd::AddProxium {
+        StoreCmd::AddVault {
             name,
-            url,
-            project,
-            client_id,
-        } => {
-            cfg.stores.push(StoreConfig::Proxium {
-                name: name.clone(),
-                url,
-                project,
-                client_id,
-            });
-            eprintln!("Run `sealkeep login {name}` to sign in.");
+            address,
+            mount,
+            auth,
+            role,
+            k8s_auth_mount,
+            jwt_command,
+            port_forward,
+        } => cfg.stores.push(StoreConfig::Vault {
+            name,
+            address,
+            mount,
+            auth: match auth {
+                AuthArg::Token => VaultAuth::Token,
+                AuthArg::Kubernetes => VaultAuth::Kubernetes,
+            },
+            role,
+            k8s_auth_mount,
+            jwt_command: jwt_command
+                .as_deref()
+                .map(split_command)
+                .unwrap_or_default(),
+            port_forward: port_forward
+                .as_deref()
+                .map(split_command)
+                .unwrap_or_default(),
+        }),
+        StoreCmd::Token { store } => {
+            match cfg.store(&store)? {
+                StoreConfig::Vault { .. } => {}
+                StoreConfig::Keyring { .. } => bail!("store `{store}` is a keyring store"),
+            }
+            let token = read_value("the Vault token", !std::io::stdin().is_terminal(), None)?;
+            store::keyring::write(
+                config::DEFAULT_KEYRING_SERVICE,
+                &store::vault::VaultStore::token_user(&store),
+                &token,
+            )?;
+            eprintln!("Stored the token of `{store}` in the keyring.");
+            return Ok(0);
         }
         StoreCmd::Remove { name } => {
             let before = cfg.stores.len();
@@ -518,41 +721,6 @@ fn store_cmd(cmd: StoreCmd) -> Result<i32> {
     }
     cfg.save()?;
     eprintln!("Saved {}.", config::path()?.display());
-    Ok(0)
-}
-
-fn proxium_store(name: &str) -> Result<store::proxium::ProxiumStore> {
-    let cfg = Config::load()?;
-    match cfg.store(name)? {
-        StoreConfig::Proxium {
-            name,
-            url,
-            project,
-            client_id,
-        } => Ok(store::proxium::ProxiumStore::new(
-            name.clone(),
-            url.clone(),
-            project.clone(),
-            client_id.clone(),
-        )),
-        StoreConfig::Keyring { .. } => {
-            bail!("store `{name}` is a keyring store; it needs no sign-in")
-        }
-    }
-}
-
-fn login(name: &str, open_browser: bool) -> Result<i32> {
-    proxium_store(name)?.login(open_browser)?;
-    eprintln!("Signed in. Store `{name}` is ready.");
-    Ok(0)
-}
-
-fn logout(name: &str) -> Result<i32> {
-    if proxium_store(name)?.logout()? {
-        eprintln!("Removed the session of `{name}`.");
-    } else {
-        eprintln!("Store `{name}` had no session.");
-    }
     Ok(0)
 }
 
@@ -631,13 +799,14 @@ fn unlock() -> Result<i32> {
     store::keyring::set_timeout(300);
     eprintln!("Approve the unlock prompt of the keyring on the desktop.");
     let cfg = Config::load()?;
-    for s in &cfg.stores {
-        if let StoreConfig::Keyring { name, service } = s {
-            let n = store::keyring::KeyringStore::new(name.clone(), service.clone());
-            store::Store::set(&n, "SEALKEEP_UNLOCK_CHECK", "unlock-check", None)?;
-            store::Store::remove(&n, "SEALKEEP_UNLOCK_CHECK")?;
-            break;
-        }
+    if let Some(StoreConfig::Keyring { name, service }) = cfg
+        .stores
+        .iter()
+        .find(|s| matches!(s, StoreConfig::Keyring { .. }))
+    {
+        let n = store::keyring::KeyringStore::new(name.clone(), service.clone());
+        store::Store::set(&n, "SEALKEEP_UNLOCK_CHECK", "unlock-check", None)?;
+        store::Store::remove(&n, "SEALKEEP_UNLOCK_CHECK")?;
     }
     eprintln!("The keyring is unlocked.");
     Ok(0)
@@ -664,6 +833,7 @@ fn doctor() -> Result<i32> {
             }
         }
     }
+    println!("aliases: {}", cfg.aliases.len());
     println!(
         "guard: block .env reads {}, {} more deny prefixes",
         if cfg.guard.block_dotenv { "on" } else { "off" },

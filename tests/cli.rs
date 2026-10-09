@@ -166,7 +166,7 @@ fn dotenv_file_is_redacted_and_removed() {
 }
 
 #[test]
-fn import_prints_names_only() {
+fn import_into_a_folder_prints_names_only() {
     let env = Env::new();
     std::fs::write(
         env.path("app.env"),
@@ -175,17 +175,208 @@ fn import_prints_names_only() {
     .unwrap();
     let out = env
         .cmd()
-        .args(["import", "app.env", "--prefix", "APP_"])
+        .args(["import", "app.env", "--to", "personal/example-app/dev"])
         .output()
         .unwrap();
     assert!(out.status.success(), "{out:?}");
     let e = String::from_utf8_lossy(&out.stderr);
-    assert!(e.contains("Imported 2 secrets"), "{e}");
-    assert!(e.contains("local:APP_OPENROUTER_API_KEY"));
-    assert!(e.contains("skipped lower_case"));
+    assert!(e.contains("Stored 3 secrets"), "{e}");
+    assert!(e.contains("personal/example-app/dev/OPENROUTER_API_KEY"));
+    assert!(e.contains("personal/example-app/dev/LOWER_CASE"));
+    assert!(e.contains("skipped EMPTY"));
     assert!(!e.contains(SECRET) && !stdout(&out).contains(SECRET));
-    let out = env.cmd().args(["list"]).output().unwrap();
-    assert!(stdout(&out).contains("APP_DB_URL"));
+
+    // A second import of the same file changes nothing.
+    let out = env
+        .cmd()
+        .args(["import", "app.env", "--to", "personal/example-app/dev"])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("Stored 0 secrets in local (3 were the same)")
+    );
+
+    let out = env
+        .cmd()
+        .args(["list", "personal/example-app"])
+        .output()
+        .unwrap();
+    assert!(stdout(&out).contains("personal/example-app/dev/DB_URL"));
+}
+
+#[test]
+fn shared_values_are_stored_once_with_aliases() {
+    let env = Env::new();
+    std::fs::write(
+        env.path("a.env"),
+        format!("STRIPE_KEY={SECRET}\nPORT=3000\n"),
+    )
+    .unwrap();
+    std::fs::write(env.path("b.env"), format!("STRIPE_SECRET={SECRET}\n")).unwrap();
+    for (file, folder, key) in [
+        ("a.env", "personal/app-a/dev", "STRIPE_KEY"),
+        ("b.env", "personal/app-b/dev", "STRIPE_SECRET"),
+    ] {
+        env.cmd()
+            .args([
+                "import",
+                file,
+                "--to",
+                folder,
+                "--map",
+                &format!("{key}=shared/stripe/test/SECRET_KEY"),
+            ])
+            .assert()
+            .success();
+    }
+    let out = env.cmd().args(["list", "--json"]).output().unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let names: Vec<&str> = v["secrets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        names.contains(&"shared/stripe/test/SECRET_KEY"),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&"personal/app-a/dev/STRIPE_KEY"),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&"personal/app-b/dev/STRIPE_SECRET"),
+        "{names:?}"
+    );
+    // One stored value, two aliases.
+    let stored = v["secrets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["store"] == "local")
+        .count();
+    assert_eq!(stored, 2, "{v}");
+
+    // A folder run gives the alias value under the alias key.
+    let out = env
+        .cmd()
+        .args([
+            "run",
+            "--all",
+            "personal/app-a/dev",
+            "--",
+            "sh",
+            "-c",
+            "echo k=$STRIPE_KEY p=$PORT",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        stdout(&out).trim(),
+        "k=[sealkeep:personal/app-a/dev/STRIPE_KEY] p=3000",
+        "{out:?}"
+    );
+
+    // A different value for the shared name is refused.
+    std::fs::write(env.path("c.env"), "STRIPE_KEY=sk-other-value-123\n").unwrap();
+    env.cmd()
+        .args([
+            "import",
+            "c.env",
+            "--to",
+            "personal/app-c/dev",
+            "--map",
+            "STRIPE_KEY=shared/stripe/test/SECRET_KEY",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("already has a different value"));
+}
+
+#[test]
+fn folder_runs_refuse_two_secrets_for_one_variable() {
+    let env = Env::new();
+    env.set("personal/app/dev/DATABASE_URL", SECRET);
+    env.set(
+        "personal/app/prod/DATABASE_URL",
+        "postgres://prod-value-123",
+    );
+    env.cmd()
+        .args(["run", "--all", "personal/app", "--", "true"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("both set DATABASE_URL"));
+    let out = env
+        .cmd()
+        .args([
+            "run",
+            "--all",
+            "personal/app/dev",
+            "--",
+            "sh",
+            "-c",
+            "echo $DATABASE_URL",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        stdout(&out).trim(),
+        "[sealkeep:personal/app/dev/DATABASE_URL]"
+    );
+}
+
+#[test]
+fn ini_files_keep_their_sections() {
+    let env = Env::new();
+    std::fs::write(
+        env.path("ovh.conf"),
+        format!("[default]\nendpoint=ovh-eu\n\n[ovh-eu]\napplication_key={SECRET}\napplication_secret=as-0123456789\n"),
+    )
+    .unwrap();
+    let out = env
+        .cmd()
+        .args(["import", "ovh.conf", "--to", "work/ovh"])
+        .output()
+        .unwrap();
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert!(e.contains("work/ovh/default/ENDPOINT"), "{e}");
+    assert!(e.contains("work/ovh/ovh-eu/APPLICATION_KEY"), "{e}");
+    assert!(!e.contains(SECRET));
+}
+
+#[test]
+fn set_from_file_and_scan() {
+    let env = Env::new();
+    std::fs::write(env.path("gh-token"), format!("{SECRET}\n")).unwrap();
+    env.cmd()
+        .args(["set", "personal/github/PAT", "--from-file", "gh-token"])
+        .assert()
+        .success();
+    let out = env
+        .cmd()
+        .args([
+            "run",
+            "personal/github/PAT",
+            "--",
+            "sh",
+            "-c",
+            "printf %s \"$PAT\" | wc -c",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(stdout(&out).trim(), SECRET.len().to_string());
+
+    std::fs::create_dir_all(env.path("proj")).unwrap();
+    std::fs::write(env.path("proj/.env"), format!("A_KEY={SECRET}\nPORT=1\n")).unwrap();
+    std::fs::write(env.path("other.env"), format!("B_TOKEN={SECRET}\n")).unwrap();
+    let out = env.cmd().args(["scan", ".", "--json"]).output().unwrap();
+    let text = stdout(&out);
+    assert!(!text.contains(SECRET), "{text}");
+    let v: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["groups"].as_array().unwrap().len(), 1, "{v}");
+    assert!(v["other_files"].to_string().contains("gh-token"), "{v}");
 }
 
 #[test]
@@ -228,38 +419,54 @@ fn guard_hook_formats() {
 }
 
 #[test]
-fn store_config_commands() {
+fn store_and_alias_config_commands() {
     let env = Env::new();
     env.cmd()
         .args([
             "store",
-            "add-proxium",
-            "team",
-            "--url",
-            "https://proxium.example",
-            "--project",
-            "acme",
+            "add-vault",
+            "vault",
+            "--address",
+            "http://127.0.0.1:{port}",
+            "--auth",
+            "token",
+            "--port-forward",
+            "kubectl -n vault port-forward svc/vault {port}:8200",
         ])
         .assert()
         .success();
     let cfg = std::fs::read_to_string(env.path("config.toml")).unwrap();
-    assert!(cfg.contains("kind = \"proxium\""), "{cfg}");
+    assert!(cfg.contains("kind = \"vault\""), "{cfg}");
     assert!(cfg.contains("kind = \"keyring\""), "{cfg}");
     env.cmd()
         .args([
             "store",
-            "add-proxium",
+            "add-vault",
             "bad",
-            "--url",
-            "http://proxium.example",
-            "--project",
-            "acme",
+            "--address",
+            "http://vault.example:8200",
+            "--auth",
+            "token",
         ])
         .assert()
         .failure()
         .stderr(predicates::str::contains("https"));
     env.cmd()
-        .args(["store", "remove", "team"])
+        .args(["store", "remove", "vault"])
+        .assert()
+        .success();
+
+    env.cmd()
+        .args(["alias", "add", "personal/app/dev/X_KEY", "shared/x/X_KEY"])
+        .assert()
+        .success();
+    env.cmd()
+        .args(["alias", "add", "shared/x/X_KEY", "shared/y/Y_KEY"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("also an alias"));
+    env.cmd()
+        .args(["alias", "rm", "personal/app/dev/X_KEY"])
         .assert()
         .success();
 }
@@ -339,16 +546,16 @@ fn mcp_lists_and_runs_with_redaction() {
     assert!(env.audit().contains("\"action\":\"mcp_run\""));
 }
 
-// ── Proxium, against a local fake ──────────────────────────────────────────
+// ── Vault KV v2, against a local fake ───────────────────────────────────────
 
 #[derive(Default)]
-struct Fake {
-    approved_after: usize,
-    polls: usize,
-    reveals: Vec<(String, String)>,
+struct KvSecret {
+    data: serde_json::Map<String, Value>,
+    version: u64,
+    custom: serde_json::Map<String, Value>,
 }
 
-fn serve_fake(state: Arc<Mutex<Fake>>) -> String {
+fn serve_fake_vault(state: Arc<Mutex<std::collections::BTreeMap<String, KvSecret>>>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = format!("http://{}", listener.local_addr().unwrap());
     std::thread::spawn(move || {
@@ -362,8 +569,7 @@ fn serve_fake(state: Arc<Mutex<Fake>>) -> String {
                 let mut parts = line.split_whitespace();
                 let method = parts.next().unwrap_or("").to_string();
                 let path = parts.next().unwrap_or("").to_string();
-                let mut len = 0;
-                let mut auth = String::new();
+                let (mut len, mut token) = (0usize, String::new());
                 loop {
                     let mut h = String::new();
                     reader.read_line(&mut h).unwrap();
@@ -374,14 +580,18 @@ fn serve_fake(state: Arc<Mutex<Fake>>) -> String {
                     if let Some(v) = lower.strip_prefix("content-length:") {
                         len = v.trim().parse().unwrap();
                     }
-                    if lower.starts_with("authorization:") {
-                        auth = h["authorization:".len()..].trim().to_string();
+                    if lower.starts_with("x-vault-token:") {
+                        token = h["x-vault-token:".len()..].trim().to_string();
                     }
                 }
                 let mut body = vec![0; len];
                 reader.read_exact(&mut body).unwrap();
                 let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-                let (status, reply) = route(&state, &method, &path, &auth, &body);
+                let (status, reply) = if token != "test-token" {
+                    (403, json!({"errors": ["permission denied"]}))
+                } else {
+                    vault_route(&mut state.lock().unwrap(), &method, &path, &body)
+                };
                 let text = reply.to_string();
                 let resp = format!(
                     "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{text}",
@@ -394,122 +604,161 @@ fn serve_fake(state: Arc<Mutex<Fake>>) -> String {
     addr
 }
 
-fn route(state: &Mutex<Fake>, method: &str, path: &str, auth: &str, body: &Value) -> (u16, Value) {
-    let mut st = state.lock().unwrap();
-    match (method, path) {
-        ("POST", "/api/auth/device/code") => {
-            assert_eq!(body["client_id"], "proxium-cli");
-            (
-                200,
-                json!({"device_code": "dc", "user_code": "ABCD1234", "verification_uri": "http://x/device",
-                         "verification_uri_complete": "http://x/device?user_code=ABCD1234", "expires_in": 60, "interval": 1}),
-            )
-        }
-        ("POST", "/api/auth/device/token") => {
-            st.polls += 1;
-            if st.polls <= st.approved_after {
-                (
-                    400,
-                    json!({"error": "authorization_pending", "error_description": "wait"}),
-                )
-            } else {
-                (
-                    200,
-                    json!({"access_token": "session-1", "token_type": "Bearer", "expires_in": 600}),
-                )
-            }
-        }
-        ("GET", "/api/auth/token") => {
-            if auth == "Bearer session-1" {
-                (200, json!({"token": "jwt-1"}))
-            } else {
-                (401, json!({"error": "unauthorized"}))
-            }
-        }
-        _ if auth != "Bearer jwt-1" => (
-            401,
-            json!({"error": {"code": "unauthenticated", "message": "no"}}),
-        ),
-        ("GET", "/api/teams/acme/secrets") => (
-            200,
-            json!({"secrets": [
-            {"name": "STRIPE_KEY", "description": "test mode", "version": 1, "updated_at": "2026-10-09T00:00:00Z", "updated_by": "u"}]}),
-        ),
-        ("POST", "/api/teams/acme/secrets/STRIPE_KEY/reveal") => {
-            st.reveals.push((
-                "STRIPE_KEY".into(),
-                body["purpose"].as_str().unwrap_or("").into(),
-            ));
-            (
-                200,
-                json!({"name": "STRIPE_KEY", "value": SECRET, "version": 1}),
-            )
-        }
-        ("POST", p) if p.ends_with("/reveal") => (
-            404,
-            json!({"error": {"code": "not_found", "message": "no"}}),
-        ),
-        _ => (
-            404,
-            json!({"error": {"code": "not_found", "message": path}}),
-        ),
+fn vault_route(
+    st: &mut std::collections::BTreeMap<String, KvSecret>,
+    method: &str,
+    path: &str,
+    body: &Value,
+) -> (u16, Value) {
+    if path == "/v1/auth/token/lookup-self" {
+        return (200, json!({"data": {"policies": ["sealkeep"]}}));
     }
+    if let Some(p) = path.strip_prefix("/v1/agent/metadata/") {
+        if let Some(prefix) = p.strip_suffix("?list=true") {
+            let prefix = prefix.trim_end_matches('/');
+            let mut keys = std::collections::BTreeSet::new();
+            for k in st.keys() {
+                let rest = if prefix.is_empty() {
+                    Some(k.as_str())
+                } else {
+                    k.strip_prefix(&format!("{prefix}/"))
+                };
+                if let Some(rest) = rest {
+                    match rest.split_once('/') {
+                        Some((dir, _)) => keys.insert(format!("{dir}/")),
+                        None => keys.insert(rest.to_string()),
+                    };
+                }
+            }
+            if keys.is_empty() {
+                return (404, json!({"errors": []}));
+            }
+            return (200, json!({"data": {"keys": keys}}));
+        }
+        return match (method, st.get_mut(p)) {
+            ("GET", Some(s)) => (
+                200,
+                json!({"data": {"custom_metadata": s.custom, "updated_time": "2026-10-09T00:00:00Z"}}),
+            ),
+            ("GET", None) => (404, json!({"errors": []})),
+            ("POST", Some(s)) => {
+                s.custom = body["custom_metadata"]
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default();
+                (204, Value::Null)
+            }
+            _ => (400, json!({"errors": ["no secret"]})),
+        };
+    }
+    if let Some(p) = path.strip_prefix("/v1/agent/data/") {
+        return match method {
+            "GET" => match st.get(p) {
+                Some(s) => (
+                    200,
+                    json!({"data": {"data": s.data, "metadata": {"version": s.version}}}),
+                ),
+                None => (404, json!({"errors": []})),
+            },
+            "POST" => {
+                let e = st.entry(p.to_string()).or_default();
+                if body["options"]["cas"].as_u64() != Some(e.version) {
+                    return (
+                        400,
+                        json!({"errors": ["check-and-set parameter did not match the current version"]}),
+                    );
+                }
+                e.data = body["data"].as_object().cloned().unwrap_or_default();
+                e.version += 1;
+                (200, json!({"data": {"version": e.version}}))
+            }
+            _ => (405, json!({"errors": []})),
+        };
+    }
+    (404, json!({"errors": ["no route"]}))
 }
 
 #[test]
-fn proxium_login_list_and_run() {
+fn sync_to_vault_and_run_from_it() {
     let env = Env::new();
-    let state = Arc::new(Mutex::new(Fake {
-        approved_after: 1,
-        ..Default::default()
-    }));
-    let url = serve_fake(state.clone());
+    let state = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+    let url = serve_fake_vault(state.clone());
+    env.set("shared/stripe/test/SECRET_KEY", SECRET);
+    env.set("personal/app/dev/DATABASE_URL", "postgres://u:p@h/app-dev");
+    env.set("BARE_KEY", "bare-value-123");
     env.cmd()
         .args([
             "store",
-            "add-proxium",
-            "team",
-            "--url",
+            "add-vault",
+            "vault",
+            "--address",
             &url,
-            "--project",
-            "acme",
+            "--auth",
+            "token",
         ])
         .assert()
         .success();
 
-    env.cmd()
-        .args(["run", "team:STRIPE_KEY", "--", "true"])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("sealkeep login team"));
+    let out = env
+        .cmd()
+        .args(["sync", "--from", "local", "--to", "vault"])
+        .env("VAULT_TOKEN", "test-token")
+        .output()
+        .unwrap();
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{e}");
+    assert!(e.contains("Copied 2 secrets"), "{e}");
+    assert!(e.contains("skipped BARE_KEY (Vault needs a folder)"), "{e}");
+    assert!(!e.contains(SECRET));
+    {
+        let st = state.lock().unwrap();
+        assert_eq!(st["shared/stripe/test"].data["SECRET_KEY"], SECRET);
+        assert!(st["shared/stripe/test"].custom.contains_key("SECRET_KEY"));
+    }
 
     let out = env
         .cmd()
-        .args(["login", "team", "--no-browser"])
+        .args(["sync", "--from", "local", "--to", "vault"])
+        .env("VAULT_TOKEN", "test-token")
         .output()
         .unwrap();
-    assert!(out.status.success(), "{out:?}");
-    assert!(String::from_utf8_lossy(&out.stderr).contains("ABCD1234"));
-    assert_eq!(state.lock().unwrap().polls, 2);
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("Copied 0 secrets from local to vault; 2 were the same")
+    );
 
-    let out = env.cmd().args(["list"]).output().unwrap();
-    assert!(stdout(&out).contains("STRIPE_KEY"), "{out:?}");
-
-    // A bare name falls through the empty local store to the Proxium store.
     let out = env
         .cmd()
-        .args(["run", "STRIPE_KEY", "--", "sh", "-c", "echo v=$STRIPE_KEY"])
+        .args(["list", "--store", "vault", "--json"])
+        .env("VAULT_TOKEN", "test-token")
         .output()
         .unwrap();
-    assert_eq!(stdout(&out).trim(), "v=[sealkeep:STRIPE_KEY]", "{out:?}");
-    let reveals = state.lock().unwrap().reveals.clone();
-    assert_eq!(reveals.len(), 1);
-    assert!(reveals[0].1.starts_with("run: sh -c"), "{reveals:?}");
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["secrets"].as_array().unwrap().len(), 2, "{v}");
 
-    env.cmd().args(["logout", "team"]).assert().success();
+    let out = env
+        .cmd()
+        .args([
+            "run",
+            "vault:shared/stripe/test/SECRET_KEY",
+            "--",
+            "sh",
+            "-c",
+            "echo $SECRET_KEY",
+        ])
+        .env("VAULT_TOKEN", "test-token")
+        .output()
+        .unwrap();
+    assert_eq!(
+        stdout(&out).trim(),
+        "[sealkeep:shared/stripe/test/SECRET_KEY]",
+        "{out:?}"
+    );
+
     env.cmd()
-        .args(["list", "--store", "team"])
+        .args(["list", "--store", "vault"])
+        .env("VAULT_TOKEN", "wrong")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("not signed in"));
+        .stderr(predicates::str::contains("permission denied"));
 }
