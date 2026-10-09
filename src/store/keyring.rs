@@ -153,10 +153,12 @@ pub fn default_locked() -> Result<Option<bool>> {
         use secret_service::blocking::SecretService;
         let ss = SecretService::connect(EncryptionType::Plain)
             .context("connect to the Secret Service on the session bus")?;
-        let c = ss
-            .get_default_collection()
-            .context("find the default keyring collection")?;
-        Ok(Some(c.is_locked()?))
+        // No default collection (a new account, or a login keyring that was moved
+        // away) needs the same step as a locked one: `unlock` creates it.
+        match ss.get_default_collection() {
+            Ok(c) => Ok(Some(c.is_locked()?)),
+            Err(_) => Ok(Some(true)),
+        }
     }
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     Ok(None)
