@@ -199,6 +199,18 @@ sealkeep sync --from local --to vault
 
 The Vault side needs a KV v2 mount, a policy with `create`, `read` and `update` on `agent/data/*` and `read`, `list` and `update` on `agent/metadata/*`, and a Kubernetes auth role bound to the ServiceAccount. With `--auth token`, sealkeep reads `$VAULT_TOKEN`, or the token that `sealkeep store token vault` keeps in the keyring.
 
+## SSH keys
+
+An SSH agent holds a key with a passphrase only in memory. After a reboot it is empty, and an agent's `git push` fails with `Permission denied (publickey)`. sealkeep keeps the passphrase and loads the key:
+
+```sh
+sealkeep set personal/ssh/ID_ED25519_PASSPHRASE
+sealkeep ssh-add ~/.ssh/id_ed25519 --passphrase personal/ssh/ID_ED25519_PASSPHRASE
+sealkeep ssh-load      # unlock runs it too
+```
+
+`ssh-load` runs `ssh-add` with sealkeep as the `SSH_ASKPASS` program. The askpass step answers only when its parent process is `ssh-add` and a one-use token matches, and it reads the passphrase from the store, so the passphrase never goes to a file or the output. `--agent` picks the agent socket; the default is `$SSH_AUTH_SOCK`.
+
 ## MCP
 
 `sealkeep mcp` serves these tools on stdio:

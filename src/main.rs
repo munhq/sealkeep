@@ -11,6 +11,7 @@ mod names;
 mod redact;
 mod run;
 mod scan;
+mod ssh;
 mod store;
 
 use anyhow::{Context, Result, bail};
@@ -169,6 +170,19 @@ enum Cmd {
     /// Unlock the OS keyring: with the login password at a terminal (GNOME Keyring with no
     /// desktop), or with the prompt on the desktop.
     Unlock,
+    /// Add the SSH keys of the config to their agents, with passphrases from sealkeep.
+    SshLoad,
+    /// Add an SSH key to the config of `ssh-load`.
+    SshAdd {
+        /// The private key file, for example ~/.ssh/id_ed25519.
+        path: String,
+        /// The secret that holds its passphrase.
+        #[arg(long)]
+        passphrase: Option<String>,
+        /// The agent socket. Default: $SSH_AUTH_SOCK when `ssh-load` runs.
+        #[arg(long)]
+        agent: Option<String>,
+    },
     /// Check the config, the stores and the clients.
     Doctor,
     /// Show the last entries of the local audit log.
@@ -232,6 +246,10 @@ enum AuthArg {
 }
 
 fn main() {
+    // sealkeep runs as the SSH_ASKPASS program of `ssh-load`.
+    if let Ok(token) = std::env::var(ssh::ASKPASS_ENV) {
+        std::process::exit(ssh::askpass(&token));
+    }
     let cli = Cli::parse();
     match dispatch(cli.cmd) {
         Ok(code) => std::process::exit(code),
@@ -317,6 +335,23 @@ fn dispatch(cmd: Cmd) -> Result<i32> {
             false,
         ),
         Cmd::Unlock => unlock(),
+        Cmd::SshLoad => ssh_load(),
+        Cmd::SshAdd {
+            path,
+            passphrase,
+            agent,
+        } => {
+            let mut cfg = Config::load()?;
+            cfg.ssh_keys.retain(|k| k.path != path);
+            cfg.ssh_keys.push(config::SshKey {
+                path: path.clone(),
+                passphrase,
+                agent,
+            });
+            cfg.save()?;
+            eprintln!("Added {path} to the keys of ssh-load.");
+            Ok(0)
+        }
         Cmd::Doctor => doctor(),
         Cmd::Audit { tail } => audit_tail(tail),
     }
@@ -843,7 +878,7 @@ fn unlock() -> Result<i32> {
         }
         Some(false) => {
             eprintln!("The keyring is unlocked.");
-            return Ok(0);
+            return ssh_load();
         }
         Some(true) => {}
     }
@@ -860,7 +895,7 @@ fn unlock() -> Result<i32> {
         store::keyring::unlock_gnome_keyring(&pw)?;
         if store::keyring::default_locked()? == Some(false) {
             eprintln!("The keyring is unlocked.");
-            return Ok(0);
+            return ssh_load();
         }
         bail!("the keyring is still locked; check the password");
     }
@@ -879,6 +914,20 @@ fn unlock() -> Result<i32> {
     }
     eprintln!("The keyring is unlocked.");
     Ok(0)
+}
+
+fn ssh_load() -> Result<i32> {
+    let cfg = Config::load()?;
+    if cfg.ssh_keys.is_empty() {
+        eprintln!("No SSH keys in the config (add one with `sealkeep ssh-add`).");
+        return Ok(0);
+    }
+    let lines = ssh::load(&cfg)?;
+    let failed = lines.iter().any(|l| l.contains(": ERROR"));
+    for l in lines {
+        eprintln!("{l}");
+    }
+    Ok(if failed { 1 } else { 0 })
 }
 
 fn doctor() -> Result<i32> {
