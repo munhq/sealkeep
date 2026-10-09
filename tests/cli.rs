@@ -380,6 +380,43 @@ fn set_from_file_and_scan() {
 }
 
 #[test]
+fn mv_keeps_the_value_and_moves_aliases() {
+    let env = Env::new();
+    env.set("personal/x/OLD_KEY", SECRET);
+    env.cmd()
+        .args([
+            "alias",
+            "add",
+            "personal/app/dev/OLD_KEY",
+            "personal/x/OLD_KEY",
+        ])
+        .assert()
+        .success();
+    env.cmd()
+        .args(["mv", "personal/x/OLD_KEY", "shared/x/NEW_KEY"])
+        .assert()
+        .success();
+    let out = env
+        .cmd()
+        .args([
+            "run",
+            "personal/app/dev/OLD_KEY",
+            "--",
+            "sh",
+            "-c",
+            "test \"$OLD_KEY\" = \"$EXPECT\" && echo same",
+        ])
+        .env("EXPECT", SECRET)
+        .output()
+        .unwrap();
+    assert_eq!(stdout(&out).trim(), "same", "{out:?}");
+    env.cmd()
+        .args(["run", "personal/x/OLD_KEY", "--", "true"])
+        .assert()
+        .failure();
+}
+
+#[test]
 fn rm_removes_from_the_store_and_the_index() {
     let env = Env::new();
     env.set("API_KEY", SECRET);

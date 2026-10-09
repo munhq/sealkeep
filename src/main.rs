@@ -59,6 +59,13 @@ enum Cmd {
         #[arg(long)]
         from_file: Option<PathBuf>,
     },
+    /// Rename a secret in its store. Aliases to the old name follow it.
+    Mv {
+        old: String,
+        new: String,
+        #[arg(long)]
+        store: Option<String>,
+    },
     /// Remove a secret.
     Rm {
         name: String,
@@ -255,6 +262,7 @@ fn dispatch(cmd: Cmd) -> Result<i32> {
             stdin,
             from_file.as_deref(),
         ),
+        Cmd::Mv { old, new, store } => mv(&old, &new, store.as_deref()),
         Cmd::Rm { name, store } => rm(&name, store.as_deref()),
         Cmd::Get { name, store } => get(&name, store.as_deref()),
         Cmd::Run {
@@ -428,6 +436,57 @@ fn set(
     record("set", vec![format!("{}:{name}", s.name())], None)?;
     eprintln!("Stored {name} in {}.", s.name());
     Ok(0)
+}
+
+fn mv(old: &str, new: &str, store: Option<&str>) -> Result<i32> {
+    names::check(old)?;
+    names::check(new)?;
+    let mut cfg = Config::load()?;
+    if let Some(target) = cfg.aliases.remove(old) {
+        cfg.aliases.insert(new.to_string(), target.clone());
+        cfg.save()?;
+        eprintln!("Moved the alias {old} -> {target} to {new}.");
+        return Ok(0);
+    }
+    let stores = Stores::from_config(&cfg);
+    let candidates: Vec<&dyn store::Store> = match store {
+        Some(s) => vec![stores.by_name(s)?],
+        None => stores.stores.iter().map(|s| s.as_ref()).collect(),
+    };
+    for s in candidates {
+        let Some(value) = s.get(old)? else { continue };
+        if s.get(new)?.is_some() {
+            bail!("`{new}` already exists in {}", s.name());
+        }
+        let desc = s
+            .list()?
+            .into_iter()
+            .find(|i| i.name == old)
+            .and_then(|i| i.description);
+        s.set(new, &value, desc.as_deref())?;
+        s.remove(old)?;
+        let mut moved = 0;
+        for t in cfg.aliases.values_mut() {
+            if t == old {
+                *t = new.to_string();
+                moved += 1;
+            }
+        }
+        if moved > 0 {
+            cfg.save()?;
+        }
+        record(
+            "move",
+            vec![format!("{}:{old}", s.name()), format!("{}:{new}", s.name())],
+            None,
+        )?;
+        eprintln!(
+            "Moved {old} to {new} in {} ({moved} aliases follow it).",
+            s.name()
+        );
+        return Ok(0);
+    }
+    bail!("no store has a secret `{old}`")
 }
 
 fn rm(name: &str, store: Option<&str>) -> Result<i32> {
