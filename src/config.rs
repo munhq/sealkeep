@@ -1,4 +1,5 @@
-//! The config file: which stores exist, and the order in which a bare name is looked up.
+//! The config file: the stores, the order in which a name is looked up, the aliases and
+//! the guard rules. It holds names only, never a value.
 //!
 //! ```toml
 //! [[store]]
@@ -6,10 +7,17 @@
 //! kind = "keyring"
 //!
 //! [[store]]
-//! name = "team"
-//! kind = "proxium"
-//! url = "https://proxium.tech"
-//! project = "acme"
+//! name = "vault"
+//! kind = "vault"
+//! address = "http://127.0.0.1:{port}"
+//! mount = "agent"
+//! auth = "kubernetes"
+//! role = "sealkeep"
+//! jwt_command = ["kubectl", "-n", "vault", "create", "token", "sealkeep", "--duration", "10m"]
+//! port_forward = ["kubectl", "-n", "vault", "port-forward", "svc/vault", "{port}:8200"]
+//!
+//! [aliases]
+//! "personal/example-app/dev/STRIPE_SECRET_KEY" = "shared/stripe/test/SECRET_KEY"
 //!
 //! [guard]
 //! block_dotenv = true
@@ -17,18 +25,23 @@
 //!
 //! With no file, sealkeep has one keyring store named `local`.
 
+use crate::names;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 pub const DEFAULT_KEYRING_SERVICE: &str = "sealkeep";
-pub const DEFAULT_PROXIUM_CLIENT_ID: &str = "proxium-cli";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default, rename = "store")]
     pub stores: Vec<StoreConfig>,
+    /// `alias name -> target name`. A project folder can name a shared secret, so the
+    /// value is stored one time.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub aliases: BTreeMap<String, String>,
     #[serde(default)]
     pub guard: GuardConfig,
 }
@@ -40,7 +53,7 @@ pub struct GuardConfig {
     #[serde(default = "yes")]
     pub block_dotenv: bool,
     /// More command prefixes to refuse, for example `vault kv get`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny: Vec<String>,
 }
 
@@ -57,6 +70,16 @@ fn yes() -> bool {
     true
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum VaultAuth {
+    /// A token in `$VAULT_TOKEN`, else in the keyring entry `vault-token:<store>`.
+    Token,
+    /// A Kubernetes ServiceAccount JWT from `jwt_command`, exchanged at
+    /// `auth/<k8s_auth_mount>/login` for a short-lived Vault token.
+    Kubernetes,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub enum StoreConfig {
@@ -66,14 +89,25 @@ pub enum StoreConfig {
         #[serde(default = "default_service")]
         service: String,
     },
-    Proxium {
+    Vault {
         name: String,
-        /// The Proxium origin, for example `https://proxium.tech`.
-        url: String,
-        /// The project slug.
-        project: String,
-        #[serde(default = "default_client_id")]
-        client_id: String,
+        /// The Vault address. `{port}` is the local port of `port_forward`.
+        address: String,
+        /// The KV v2 mount.
+        mount: String,
+        auth: VaultAuth,
+        /// The role for Kubernetes auth.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role: Option<String>,
+        #[serde(default = "default_k8s_mount")]
+        k8s_auth_mount: String,
+        /// A command that prints a ServiceAccount JWT, for Kubernetes auth.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        jwt_command: Vec<String>,
+        /// A command that forwards a local port to Vault while sealkeep runs. `{port}`
+        /// is a free local port that sealkeep chooses.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        port_forward: Vec<String>,
     },
 }
 
@@ -81,14 +115,14 @@ fn default_service() -> String {
     DEFAULT_KEYRING_SERVICE.to_string()
 }
 
-fn default_client_id() -> String {
-    DEFAULT_PROXIUM_CLIENT_ID.to_string()
+fn default_k8s_mount() -> String {
+    "kubernetes".to_string()
 }
 
 impl StoreConfig {
     pub fn name(&self) -> &str {
         match self {
-            StoreConfig::Keyring { name, .. } | StoreConfig::Proxium { name, .. } => name,
+            StoreConfig::Keyring { name, .. } | StoreConfig::Vault { name, .. } => name,
         }
     }
 }
@@ -100,6 +134,7 @@ impl Default for Config {
                 name: "local".into(),
                 service: default_service(),
             }],
+            aliases: BTreeMap::new(),
             guard: GuardConfig::default(),
         }
     }
@@ -160,16 +195,40 @@ impl Config {
             if !seen.insert(n) {
                 bail!("two stores have the name `{n}`");
             }
-            if let StoreConfig::Proxium { url, project, .. } = s {
-                if !(url.starts_with("https://")
-                    || url.starts_with("http://localhost")
-                    || url.starts_with("http://127.0.0.1"))
-                {
-                    bail!("store `{n}`: the Proxium URL must use https");
+            if let StoreConfig::Vault {
+                address,
+                mount,
+                auth,
+                role,
+                jwt_command,
+                port_forward,
+                ..
+            } = s
+            {
+                let local = address.starts_with("http://127.0.0.1")
+                    || address.starts_with("http://localhost");
+                if !(address.starts_with("https://") || local) {
+                    bail!("store `{n}`: the Vault address must use https, or be a local port");
                 }
-                if project.is_empty() {
-                    bail!("store `{n}`: the project is empty");
+                if address.contains("{port}") && port_forward.is_empty() {
+                    bail!("store `{n}`: the address has {{port}}, so it needs port_forward");
                 }
+                if !port_forward.is_empty() && !port_forward.iter().any(|a| a.contains("{port}")) {
+                    bail!("store `{n}`: port_forward needs the argument {{port}}");
+                }
+                if mount.is_empty() || mount.contains('/') {
+                    bail!("store `{n}`: the mount is one path segment, for example `agent`");
+                }
+                if *auth == VaultAuth::Kubernetes && (role.is_none() || jwt_command.is_empty()) {
+                    bail!("store `{n}`: Kubernetes auth needs `role` and `jwt_command`");
+                }
+            }
+        }
+        for (alias, target) in &self.aliases {
+            names::check(alias).with_context(|| format!("alias `{alias}`"))?;
+            names::check(target).with_context(|| format!("alias target `{target}`"))?;
+            if self.aliases.contains_key(target) {
+                bail!("alias `{alias}` points to `{target}`, which is also an alias");
             }
         }
         Ok(())
@@ -188,7 +247,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_both_kinds() {
+    fn parse_both_kinds_and_aliases() {
         let cfg: Config = toml::from_str(
             r#"
             [[store]]
@@ -196,32 +255,46 @@ mod tests {
             kind = "keyring"
 
             [[store]]
-            name = "team"
-            kind = "proxium"
-            url = "https://proxium.example"
-            project = "acme"
+            name = "vault"
+            kind = "vault"
+            address = "http://127.0.0.1:{port}"
+            mount = "agent"
+            auth = "kubernetes"
+            role = "sealkeep"
+            jwt_command = ["kubectl", "create", "token", "sealkeep"]
+            port_forward = ["kubectl", "port-forward", "svc/vault", "{port}:8200"]
+
+            [aliases]
+            "personal/example-app/dev/STRIPE_SECRET_KEY" = "shared/stripe/test/SECRET_KEY"
             "#,
         )
         .unwrap();
         cfg.validate().unwrap();
         assert_eq!(cfg.stores.len(), 2);
+        assert_eq!(cfg.aliases.len(), 1);
         assert!(cfg.guard.block_dotenv);
-        match &cfg.stores[1] {
-            StoreConfig::Proxium { client_id, .. } => assert_eq!(client_id, "proxium-cli"),
-            other => panic!("{other:?}"),
-        }
     }
 
     #[test]
-    fn rejects_plain_http_and_duplicates() {
+    fn rejects_bad_vault_and_alias_chains() {
         let mut cfg = Config::default();
-        cfg.stores.push(StoreConfig::Proxium {
-            name: "team".into(),
-            url: "http://proxium.example".into(),
-            project: "acme".into(),
-            client_id: "proxium-cli".into(),
+        cfg.stores.push(StoreConfig::Vault {
+            name: "vault".into(),
+            address: "http://vault.example:8200".into(),
+            mount: "agent".into(),
+            auth: VaultAuth::Token,
+            role: None,
+            k8s_auth_mount: "kubernetes".into(),
+            jwt_command: vec![],
+            port_forward: vec![],
         });
         assert!(cfg.validate().is_err());
+
+        let mut cfg = Config::default();
+        cfg.aliases.insert("a/B".into(), "c/D".into());
+        cfg.aliases.insert("c/D".into(), "e/F".into());
+        assert!(cfg.validate().is_err());
+
         let mut cfg = Config::default();
         cfg.stores.push(cfg.stores[0].clone());
         assert!(cfg.validate().is_err());

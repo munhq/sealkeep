@@ -21,7 +21,7 @@ pub struct RunSpec {
     /// Secrets that go into a dotenv file, for a tool that reads its secrets from a file.
     pub dotenv: Vec<Binding>,
     pub cwd: Option<PathBuf>,
-    /// The audit action and the purpose that a remote store logs.
+    /// The audit action.
     pub action: &'static str,
 }
 
@@ -38,11 +38,10 @@ pub fn prepare(stores: &Stores, mut spec: RunSpec) -> Result<Prepared> {
     if spec.argv.is_empty() {
         bail!("no command to run");
     }
-    let purpose = format!("{}: {}", spec.action, audit::command_line(&spec.argv));
     let env_refs: Vec<_> = spec.env.iter().map(|b| b.secret.clone()).collect();
     let file_refs: Vec<_> = spec.dotenv.iter().map(|b| b.secret.clone()).collect();
-    let env_vals: Vec<Resolved> = stores.resolve(&env_refs, &purpose)?;
-    let file_vals: Vec<Resolved> = stores.resolve(&file_refs, &purpose)?;
+    let env_vals: Vec<Resolved> = stores.resolve(&env_refs)?;
+    let file_vals: Vec<Resolved> = stores.resolve(&file_refs)?;
 
     let all: Vec<(&str, &str)> = env_vals
         .iter()

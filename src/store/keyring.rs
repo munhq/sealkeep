@@ -254,11 +254,12 @@ impl Store for KeyringStore {
                 name,
                 description: e.description,
                 updated_at: e.updated_at,
+                alias_of: None,
             })
             .collect())
     }
 
-    fn get(&self, name: &str, _purpose: &str) -> Result<Option<String>> {
+    fn get(&self, name: &str) -> Result<Option<String>> {
         read(&self.service, name)
     }
 
