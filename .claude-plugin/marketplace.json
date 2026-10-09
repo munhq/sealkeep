@@ -1,0 +1,20 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "sealkeep",
+  "description": "Let AI agents use secrets without seeing them: inject a secret into one command and redact it from the output.",
+  "owner": {
+    "name": "munhq"
+  },
+  "plugins": [
+    {
+      "name": "sealkeep",
+      "description": "The sealkeep MCP server, the skill that tells the agent to use secrets by name, and the guard hook that refuses cat .env, sealkeep get and direct keyring reads.",
+      "author": {
+        "name": "munhq"
+      },
+      "category": "security",
+      "source": "./plugin",
+      "homepage": "https://github.com/munhq/sealkeep"
+    }
+  ]
+}

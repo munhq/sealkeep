@@ -43,11 +43,12 @@ jobs:
           SRV=$(node -p "require('./server.json').version")
           SRVPKG=$(node -p "require('./server.json').packages[0].version")
           CARGO=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          PLUGIN=$(node -p "require('./plugin/.claude-plugin/plugin.json').version")
           MCPNAME=$(node -p "require('./npm/package.json').mcpName")
           SRVNAME=$(node -p "require('./server.json').name")
           [ "$MCPNAME" = "$SRVNAME" ] || { echo "::error::mcpName $MCPNAME, server.json name $SRVNAME"; exit 1; }
-          for v in "$SRV" "$SRVPKG" "$CARGO"; do
-            [ "$v" = "$PKG" ] || { echo "::error::versions differ: npm $PKG, server.json $SRV/$SRVPKG, Cargo.toml $CARGO"; exit 1; }
+          for v in "$SRV" "$SRVPKG" "$CARGO" "$PLUGIN"; do
+            [ "$v" = "$PKG" ] || { echo "::error::versions differ: npm $PKG, server.json $SRV/$SRVPKG, Cargo.toml $CARGO, plugin.json $PLUGIN"; exit 1; }
           done
           if [ "$REF_TYPE" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "$PKG" ]; then
             echo "::error::tag $GITHUB_REF_NAME, npm/package.json $PKG"; exit 1

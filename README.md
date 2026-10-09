@@ -4,7 +4,13 @@
   <a href="https://www.npmjs.com/package/@munhq/sealkeep"><img alt="npm" src="https://img.shields.io/npm/v/@munhq/sealkeep?color=a3122f"></a>
   <a href="https://registry.modelcontextprotocol.io/v0/servers?search=io.github.munhq/sealkeep"><img alt="MCP registry" src="https://img.shields.io/badge/MCP_registry-io.github.munhq%2Fsealkeep-a3122f"></a>
   <a href="https://github.com/munhq/sealkeep/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/munhq/sealkeep/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://smithery.ai/servers/munhq/sealkeep"><img alt="Smithery" src="https://img.shields.io/badge/Smithery-munhq%2Fsealkeep-a3122f"></a>
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/licence-MIT-a3122f"></a>
+</p>
+
+<p align="center">
+  <a href="cursor://anysphere.cursor-deeplink/mcp/install?name=sealkeep&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIkBtdW5ocS9zZWFsa2VlcCJdfQ=="><img alt="Install in Cursor" src="https://img.shields.io/badge/Install-Cursor-000?logo=cursor"></a>
+  <a href="vscode:mcp/install?%7B%22name%22%3A%22sealkeep%22%2C%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22%40munhq%2Fsealkeep%22%5D%7D"><img alt="Install in VS Code" src="https://img.shields.io/badge/Install-VS%20Code-007ACC?logo=visualstudiocode"></a>
 </p>
 
 # sealkeep
@@ -33,13 +39,20 @@ It has four parts:
 
 ## Install
 
-As an MCP server only (any client):
+As an MCP server only (any client), the command is `npx -y @munhq/sealkeep`:
 
 ```json
 { "mcpServers": { "sealkeep": { "command": "npx", "args": ["-y", "@munhq/sealkeep"] } } }
 ```
 
-The full install below also adds the guard hook and the skill.
+In Claude Code, the plugin adds the MCP server, the skill and the guard hook in one step:
+
+```
+/plugin marketplace add munhq/sealkeep
+/plugin install sealkeep@sealkeep
+```
+
+The full install below does the same for Claude Code, Codex and Cursor.
 
 Linux and macOS:
 

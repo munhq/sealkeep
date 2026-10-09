@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const SKILL: &str = include_str!("../skills/sealkeep/SKILL.md");
+pub const SKILL: &str = include_str!("../plugin/skills/sealkeep/SKILL.md");
 const MARK: &str = "sealkeep guard";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
