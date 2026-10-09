@@ -1,0 +1,17 @@
+{
+  "name": "sealkeep",
+  "owner": {
+    "name": "munhq"
+  },
+  "metadata": {
+    "description": "Let AI agents use secrets without seeing them: inject a secret into one command and redact it from the output.",
+    "version": "0.3.0"
+  },
+  "plugins": [
+    {
+      "name": "sealkeep",
+      "source": "./plugin",
+      "description": "The sealkeep MCP server, the skill that tells the agent to use secrets by name, and the guard hook."
+    }
+  ]
+}
