@@ -149,6 +149,23 @@ impl Redactor {
         out
     }
 
+    /// The names of the secrets whose value is in `input`, in the order of first match.
+    pub fn names_in(&self, input: &[u8]) -> Vec<String> {
+        let Some(ac) = &self.ac else {
+            return Vec::new();
+        };
+        let mut out: Vec<String> = Vec::new();
+        for m in ac.find_iter(input) {
+            let label = &self.labels[m.pattern().as_usize()];
+            let name =
+                String::from_utf8_lossy(&label[b"[sealkeep:".len()..label.len() - 1]).into_owned();
+            if !out.contains(&name) {
+                out.push(name);
+            }
+        }
+        out
+    }
+
     pub fn redact_str(&self, input: &str) -> String {
         String::from_utf8_lossy(&self.redact_all(input.as_bytes())).into_owned()
     }

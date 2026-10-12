@@ -1,6 +1,6 @@
 [package]
 name = "sealkeep"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Give AI agents the use of your secrets without the values: named secrets in the OS keyring, Vault, AWS, Google, Azure, 1Password or Bitwarden, injected into a command and redacted from its output."

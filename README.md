@@ -276,6 +276,11 @@ The hook refuses these tool calls, and it tells the agent to use `sealkeep run`:
 3. A read of a `.env` file by a shell command or by the Read and Grep tools, when `block_dotenv` is on. `.env.example`, `.env.sample`, `.env.template` and `.env.dist` stay readable.
 4. Each command prefix in `guard.deny`.
 
+Two more layers work for Claude Code:
+
+1. **The output guard** (`sealkeep guard --after`, a PostToolUse hook for Bash, Read and Grep). After the tool call, it compares the result with the values of the stored secrets, in the same forms as `run` redaction. When a value is in the result, the hook replaces it with `[sealkeep:NAME]` before the agent reads the result, and it names the secret in a note. This also covers `env > out.txt` followed by a read of `out.txt`, and a glob or a variable in the path. The stores load in parallel with a limit of 4 seconds, and a store that does not answer adds no values. Claude Code records the original output in its own telemetry.
+2. **Deny rules** (`permissions.deny` in `settings.json`). `sealkeep install` adds `Read(**/.env)`, `Read(**/.env.local)`, `Read(**/*.env)` and the rules for the other `.env.*` names. Claude Code checks these rules on the path, so the Read tool and the file commands that it recognizes cannot reach the file by a shell trick. The install adds them when `block_dotenv` is on, and `sealkeep uninstall` removes them.
+
 ## What sealkeep protects, and what it does not
 
 sealkeep keeps secrets out of the context of the agent, out of the transcript and out of the files of the project. Each use goes into the audit log (`~/.local/share/sealkeep/audit.jsonl` on Linux, or `$SEALKEEP_AUDIT_LOG`), with the names and the command and never a value.

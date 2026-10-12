@@ -459,6 +459,49 @@ fn guard_hook_formats() {
 }
 
 #[test]
+fn guard_after_replaces_a_stored_value_in_the_result() {
+    let env = Env::new();
+    env.set("API_KEY", SECRET);
+    let input = json!({
+        "tool_name": "Bash",
+        "tool_input": {"command": "env"},
+        "tool_response": {"stdout": format!("HOME=/home/user\nAPI_KEY={SECRET}\n"), "stderr": "", "interrupted": false}
+    });
+    let out = env
+        .cmd()
+        .args(["guard", "--client", "claude", "--after"])
+        .write_stdin(input.to_string())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(!stdout(&out).contains(SECRET));
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let h = &v["hookSpecificOutput"];
+    assert_eq!(h["hookEventName"], "PostToolUse");
+    assert_eq!(
+        h["updatedToolOutput"]["stdout"],
+        "HOME=/home/user\nAPI_KEY=[sealkeep:API_KEY]\n"
+    );
+    assert_eq!(h["updatedToolOutput"]["interrupted"], false);
+    assert!(
+        h["additionalContext"]
+            .as_str()
+            .unwrap()
+            .contains("`API_KEY`")
+    );
+
+    let clean = json!({"tool_name": "Bash", "tool_response": {"stdout": "hello\n"}});
+    let out = env
+        .cmd()
+        .args(["guard", "--client", "claude", "--after"])
+        .write_stdin(clean.to_string())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
 fn store_and_alias_config_commands() {
     let env = Env::new();
     env.cmd()

@@ -148,6 +148,10 @@ enum Cmd {
     Guard {
         #[arg(long, value_enum, default_value = "claude")]
         client: guard::Client,
+        /// The post-tool hook: replace the value of a stored secret in the result of a
+        /// tool call.
+        #[arg(long)]
+        after: bool,
     },
     /// Install the skill, the MCP server and the guard hook into the AI clients.
     Install {
@@ -348,7 +352,11 @@ fn dispatch(cmd: Cmd) -> Result<i32> {
         Cmd::Alias { cmd } => alias_cmd(cmd),
         Cmd::Store { cmd } => store_cmd(cmd),
         Cmd::Mcp => mcp::serve().map(|_| 0),
-        Cmd::Guard { client } => Ok(guard_cmd(client)),
+        Cmd::Guard { client, after } => Ok(if after {
+            guard_after_cmd()
+        } else {
+            guard_cmd(client)
+        }),
         Cmd::Install {
             client,
             dry_run,
@@ -942,6 +950,24 @@ fn guard_cmd(client: guard::Client) -> i32 {
     // A config that does not parse keeps the default rules on.
     let cfg = Config::load().unwrap_or_default();
     guard::respond(client, guard::check(&v, &cfg))
+}
+
+/// The PostToolUse hook. A config or a store that cannot be read lets the result through.
+fn guard_after_cmd() -> i32 {
+    let mut input = String::new();
+    if std::io::stdin().read_to_string(&mut input).is_err() {
+        return 0;
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&input) else {
+        return 0;
+    };
+    let Ok(cfg) = Config::load() else { return 0 };
+    let values = guard::load_values(&cfg);
+    let redactor = redact::Redactor::new(values.iter().map(|(n, v)| (n.as_str(), v.as_str())));
+    if let Some(out) = guard::check_output(&v, &redactor) {
+        println!("{out}");
+    }
+    0
 }
 
 fn install_cmd(

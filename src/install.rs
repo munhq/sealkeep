@@ -11,6 +11,7 @@
 //! `~/.claude-*` folder that Claude Code has used. Each JSON file is backed up to
 //! `<file>.bak-<unix time>` before a change.
 
+use crate::config::Config;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -19,6 +20,19 @@ use std::process::Command;
 
 pub const SKILL: &str = include_str!("../plugin/skills/sealkeep/SKILL.md");
 const MARK: &str = "sealkeep guard";
+
+/// The `permissions.deny` rules of Claude Code for the files that hold secret values.
+/// Claude Code checks them on the path, so a shell trick does not change the result.
+/// `.env.example` and the other template names stay readable.
+const DENY_RULES: &[&str] = &[
+    "Read(**/.env)",
+    "Read(**/.env.local)",
+    "Read(**/.env.development)",
+    "Read(**/.env.production)",
+    "Read(**/.env.staging)",
+    "Read(**/.env.test)",
+    "Read(**/*.env)",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum ClientId {
@@ -221,6 +235,84 @@ fn add_pretool_hook(ctx: &Ctx, path: &Path, matcher: &str, client: &str) -> Resu
         format!("{verb} the guard hook to {}", path.display())
     } else {
         format!("the guard hook is already in {}", path.display())
+    })
+}
+
+/// Claude Code: a PostToolUse group that replaces a stored secret value in a tool result.
+fn add_posttool_hook(ctx: &Ctx, path: &Path, matcher: &str) -> Result<String> {
+    let cmd = format!("{} --after", guard_command(ctx, "claude"));
+    let changed = edit_json(ctx, path, |v| {
+        let hooks = v
+            .as_object_mut()
+            .expect("checked")
+            .entry("hooks")
+            .or_insert_with(|| json!({}));
+        let list = hooks
+            .as_object_mut()
+            .context("`hooks` is not an object")?
+            .entry("PostToolUse")
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .context("`hooks.PostToolUse` is not a list")?;
+        if list.iter().any(|g| g.to_string().contains(MARK)) {
+            return Ok(false);
+        }
+        list.push(json!({"matcher": matcher, "hooks": [{"type": "command", "command": cmd, "timeout": 10}]}));
+        Ok(true)
+    })?;
+    Ok(if changed {
+        let verb = if ctx.dry_run { "would add" } else { "added" };
+        format!("{verb} the output guard to {}", path.display())
+    } else {
+        format!("the output guard is already in {}", path.display())
+    })
+}
+
+/// Claude Code: `permissions.deny` rules for the `.env` files.
+fn add_deny_rules(ctx: &Ctx, path: &Path) -> Result<String> {
+    let changed = edit_json(ctx, path, |v| {
+        let list = v
+            .as_object_mut()
+            .expect("checked")
+            .entry("permissions")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .context("`permissions` is not an object")?
+            .entry("deny")
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .context("`permissions.deny` is not a list")?;
+        let mut changed = false;
+        for rule in DENY_RULES {
+            if !list.iter().any(|r| r.as_str() == Some(rule)) {
+                list.push(json!(rule));
+                changed = true;
+            }
+        }
+        Ok(changed)
+    })?;
+    Ok(if changed {
+        let verb = if ctx.dry_run { "would add" } else { "added" };
+        format!("{verb} the .env deny rules to {}", path.display())
+    } else {
+        format!("the .env deny rules are already in {}", path.display())
+    })
+}
+
+fn remove_deny_rules(ctx: &Ctx, path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    edit_json(ctx, path, |v| {
+        let Some(list) = v
+            .pointer_mut("/permissions/deny")
+            .and_then(Value::as_array_mut)
+        else {
+            return Ok(false);
+        };
+        let before = list.len();
+        list.retain(|r| !r.as_str().is_some_and(|r| DENY_RULES.contains(&r)));
+        Ok(list.len() != before)
     })
 }
 
@@ -477,6 +569,31 @@ pub fn apply(ctx: &Ctx, clients: &[ClientId], add: bool) -> Result<Vec<String>> 
                             })
                         };
                         push(label.clone(), r);
+                        if add {
+                            push(
+                                label.clone(),
+                                add_posttool_hook(ctx, &settings, "Bash|Read|Grep"),
+                            );
+                            if Config::load().unwrap_or_default().guard.block_dotenv {
+                                push(label.clone(), add_deny_rules(ctx, &settings));
+                            }
+                        } else {
+                            let post = remove_hooks(ctx, &settings, "PostToolUse");
+                            let deny = remove_deny_rules(ctx, &settings);
+                            push(
+                                label.clone(),
+                                post.and_then(|p| deny.map(|d| (p, d))).map(|(p, d)| {
+                                    if p || d {
+                                        format!(
+                                            "removed the output guard and the deny rules from {}",
+                                            settings.display()
+                                        )
+                                    } else {
+                                        "no output guard or deny rules to remove".into()
+                                    }
+                                }),
+                            );
+                        }
                     }
                 }
             }
@@ -646,6 +763,48 @@ mod tests {
             })
             .count();
         assert!(backups >= 1);
+    }
+
+    #[test]
+    fn output_guard_and_deny_rules_are_added_once_and_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"permissions":{"deny":["Bash(rm -rf *)"]},"hooks":{"PostToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"other"}]}]}}"#,
+        )
+        .unwrap();
+        let c = ctx();
+        for _ in 0..2 {
+            add_posttool_hook(&c, &path, "Bash|Read|Grep").unwrap();
+            add_deny_rules(&c, &path).unwrap();
+        }
+        let v = read_json(&path).unwrap();
+        let post = v.pointer("/hooks/PostToolUse").unwrap().as_array().unwrap();
+        assert_eq!(post.len(), 2);
+        assert_eq!(
+            post[1].pointer("/hooks/0/command").unwrap(),
+            "/opt/bin/sealkeep guard --client claude --after"
+        );
+        let deny = v.pointer("/permissions/deny").unwrap().as_array().unwrap();
+        assert_eq!(deny.len(), 1 + DENY_RULES.len());
+        assert_eq!(deny[0], "Bash(rm -rf *)");
+
+        assert!(remove_hooks(&c, &path, "PostToolUse").unwrap());
+        assert!(remove_deny_rules(&c, &path).unwrap());
+        let v = read_json(&path).unwrap();
+        assert_eq!(
+            v.pointer("/hooks/PostToolUse")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            v.pointer("/permissions/deny").unwrap(),
+            &json!(["Bash(rm -rf *)"])
+        );
     }
 
     #[cfg(unix)]

@@ -1,5 +1,6 @@
 #!/bin/sh
-# Run `sealkeep guard` on the tool call that Claude Code sends on stdin.
+# Run `sealkeep guard` on the tool call that Claude Code sends on stdin. The argument
+# `--after` runs the post-tool half, which replaces a stored secret value in the result.
 #
 # The hook runs before every Bash, Read and Grep call, so it uses a binary that is
 # already on the machine: $SEALKEEP_BIN, then `sealkeep` on PATH, then the newest
@@ -18,4 +19,4 @@ fi
 if [ -z "$bin" ] || [ ! -x "$bin" ]; then
   exit 0
 fi
-exec "$bin" guard --client claude
+exec "$bin" guard --client claude "$@"

@@ -15,7 +15,11 @@
 //! Cursor gets `{"permission": "deny", …}` on stdout.
 
 use crate::config::{Config, DEFAULT_KEYRING_SERVICE};
+use crate::redact::Redactor;
+use crate::store;
 use serde_json::Value;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Client {
@@ -54,6 +58,95 @@ pub fn check(input: &Value, cfg: &Config) -> Option<String> {
         }
     }
     None
+}
+
+/// How long the post-tool hook may spend to read the secret values of the stores.
+const LOAD_BUDGET: Duration = Duration::from_secs(4);
+
+/// The text of a tool result: each string in `tool_response`, joined by line breaks.
+fn response_text(response: &Value) -> String {
+    fn walk(v: &Value, out: &mut Vec<String>) {
+        match v {
+            Value::String(s) => out.push(s.clone()),
+            Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+            Value::Object(o) => o.values().for_each(|x| walk(x, out)),
+            _ => {}
+        }
+    }
+    let mut parts = Vec::new();
+    walk(response, &mut parts);
+    parts.join("\n")
+}
+
+/// The same JSON with each string redacted, so the shape of the result stays the one the
+/// tool made.
+fn redact_json(v: &Value, redactor: &Redactor) -> Value {
+    match v {
+        Value::String(s) => Value::String(redactor.redact_str(s)),
+        Value::Array(a) => Value::Array(a.iter().map(|x| redact_json(x, redactor)).collect()),
+        Value::Object(o) => Value::Object(
+            o.iter()
+                .map(|(k, x)| (k.clone(), redact_json(x, redactor)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// The `(name, value)` of each secret in the stores of the config. Each store loads in its
+/// own thread. A store that does not answer within `LOAD_BUDGET` adds nothing, so the hook
+/// ends before its time limit.
+pub fn load_values(cfg: &Config) -> Vec<(String, String)> {
+    let (tx, rx) = mpsc::channel();
+    for sc in &cfg.stores {
+        let sc = sc.clone();
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let s = store::open(&sc);
+            let Ok(list) = s.list() else { return };
+            for info in list {
+                if let Ok(Some(value)) = s.get(&info.name) {
+                    let _ = tx.send((info.name, value));
+                }
+            }
+        });
+    }
+    drop(tx);
+    let deadline = Instant::now() + LOAD_BUDGET;
+    let mut out = Vec::new();
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        match rx.recv_timeout(left) {
+            Ok(pair) => out.push(pair),
+            Err(_) => break,
+        }
+    }
+    out
+}
+
+/// Check the result of a finished tool call. When it holds the value of a stored secret,
+/// the answer is the PostToolUse output of Claude Code: the result with each value
+/// replaced by `[sealkeep:NAME]`, and a note that names the secrets. It never holds a
+/// value.
+pub fn check_output(input: &Value, redactor: &Redactor) -> Option<Value> {
+    let response = input.get("tool_response")?;
+    let names = redactor.names_in(response_text(response).as_bytes());
+    if names.is_empty() {
+        return None;
+    }
+    let shown = names
+        .iter()
+        .map(|n| format!("`{n}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUse",
+            "updatedToolOutput": redact_json(response, redactor),
+            "additionalContext": format!(
+                "sealkeep guard: the output of this tool call held the value of {shown}, and sealkeep replaced it. Do not ask for the value again. {ADVICE}"
+            ),
+        }
+    }))
 }
 
 fn command_of(v: &Value) -> Option<String> {
@@ -467,6 +560,37 @@ mod tests {
         c.guard.deny = vec!["vault kv get".into()];
         assert!(check_command("vault kv get secret/x", &c).is_some());
         assert!(check_command("vault kv list secret/", &c).is_none());
+    }
+
+    #[test]
+    fn output_with_a_stored_value_is_redacted_in_shape() {
+        let value = "sk-test-0123456789abcdef";
+        let r = Redactor::new([("shared/acme/prod/API_KEY", value)]);
+        let input = json!({"tool_response": {
+            "stdout": format!("A=1\nAPI_KEY={value}"),
+            "file": {"content": [format!("x {value} y"), "clean"]},
+            "code": 0
+        }});
+        let out = check_output(&input, &r).unwrap();
+        let h = &out["hookSpecificOutput"];
+        let shown = h["updatedToolOutput"].to_string();
+        assert!(!shown.contains(value));
+        assert_eq!(h["updatedToolOutput"]["code"], 0);
+        assert_eq!(
+            h["updatedToolOutput"]["file"]["content"][0],
+            "x [sealkeep:shared/acme/prod/API_KEY] y"
+        );
+        assert!(
+            h["additionalContext"]
+                .as_str()
+                .unwrap()
+                .contains("shared/acme/prod/API_KEY")
+        );
+        assert!(!out.to_string().contains(value));
+
+        let clean = json!({"tool_response": {"stdout": "hello"}});
+        assert!(check_output(&clean, &r).is_none());
+        assert!(check_output(&json!({"tool_name": "Bash"}), &r).is_none());
     }
 
     #[test]

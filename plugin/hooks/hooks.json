@@ -1,5 +1,5 @@
 {
-  "description": "The sealkeep guard: refuses a tool call that would put a secret value into the context (cat .env, sealkeep get, a direct read of the sealkeep keyring entries) and tells the agent to use `sealkeep run`.",
+  "description": "The sealkeep guard: refuses a tool call that would put a secret value into the context (cat .env, sealkeep get, a direct read of the sealkeep keyring entries) and tells the agent to use `sealkeep run`. After a tool call, it replaces the value of a stored secret in the result.",
   "hooks": {
     "PreToolUse": [
       {
@@ -8,6 +8,18 @@
           {
             "type": "command",
             "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Read|Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.sh\" --after",
             "timeout": 10
           }
         ]
