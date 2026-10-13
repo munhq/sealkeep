@@ -12,7 +12,7 @@
 //! that `ssh-load` wrote for this run and that the step removes. The file holds the
 //! name of the passphrase secret; the step reads the value from the store.
 
-use crate::config::{Config, SshKey};
+use crate::config::{self, Config, SshKey};
 use crate::names::SecretRef;
 use crate::store::Stores;
 use anyhow::{Context, Result, bail};
@@ -21,15 +21,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub const ASKPASS_ENV: &str = "SEALKEEP_ASKPASS_TOKEN";
-
-fn expand(p: &str) -> PathBuf {
-    match p.strip_prefix("~/") {
-        Some(rest) => directories::BaseDirs::new()
-            .map(|d| d.home_dir().join(rest))
-            .unwrap_or_else(|| PathBuf::from(p)),
-        None => PathBuf::from(p),
-    }
-}
 
 fn fingerprint(key: &Path) -> Result<String> {
     let pubkey = PathBuf::from(format!("{}.pub", key.display()));
@@ -85,7 +76,7 @@ pub fn load(cfg: &Config) -> Result<Vec<String>> {
     let bin = std::env::current_exe().context("find the sealkeep binary")?;
     let mut lines = Vec::new();
     for k in &cfg.ssh_keys {
-        let path = expand(&k.path);
+        let path = config::expand_home(&k.path);
         let agent = match &k.agent {
             Some(a) => a.clone(),
             None => std::env::var("SSH_AUTH_SOCK")

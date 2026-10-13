@@ -670,7 +670,13 @@ fn serve_fake_vault(state: Arc<Mutex<std::collections::BTreeMap<String, KvSecret
                 let mut body = vec![0; len];
                 reader.read_exact(&mut body).unwrap();
                 let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-                let (status, reply) = if token != "test-token" {
+                let (status, reply) = if path == "/v1/auth/approle/login" {
+                    if body["role_id"] == "test-role" && body["secret_id"] == "test-secret" {
+                        (200, json!({"auth": {"client_token": "test-token"}}))
+                    } else {
+                        (400, json!({"errors": ["invalid role or secret ID"]}))
+                    }
+                } else if token != "test-token" || path.contains("/forbidden") {
                     (403, json!({"errors": ["permission denied"]}))
                 } else {
                     vault_route(&mut state.lock().unwrap(), &method, &path, &body)
@@ -888,6 +894,225 @@ fn sync_to_vault_and_run_from_it() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("permission denied"));
+}
+
+#[test]
+fn vault_only_with_approle_and_token_file_never_opens_the_keyring() {
+    let env = Env::new();
+    let state = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+    let url = serve_fake_vault(state.clone());
+    std::fs::write(env.path("role-id"), "test-role\n").unwrap();
+    std::fs::write(env.path("secret-id"), "test-secret\n").unwrap();
+    std::fs::write(env.path("token"), "test-token\n").unwrap();
+    let (role_id, secret_id, token) = (
+        env.path("role-id"),
+        env.path("secret-id"),
+        env.path("token"),
+    );
+    env.cmd()
+        .args([
+            "store",
+            "add-vault",
+            "vault",
+            "--address",
+            &url,
+            "--auth",
+            "approle",
+        ])
+        .arg("--role-id-file")
+        .arg(&role_id)
+        .arg("--secret-id-file")
+        .arg(&secret_id)
+        .assert()
+        .success();
+    env.cmd()
+        .args([
+            "store",
+            "add-vault",
+            "agent",
+            "--address",
+            &url,
+            "--auth",
+            "token-file",
+        ])
+        .arg("--token-file")
+        .arg(&token)
+        .assert()
+        .success();
+    env.cmd()
+        .args(["store", "remove", "local"])
+        .assert()
+        .success();
+    let cfg = std::fs::read_to_string(env.path("config.toml")).unwrap();
+    assert!(cfg.contains("auth = \"approle\""), "{cfg}");
+    assert!(cfg.contains("auth = \"token-file\""), "{cfg}");
+    assert!(!cfg.contains("kind = \"keyring\""), "{cfg}");
+
+    let out = env
+        .cmd()
+        .args([
+            "set",
+            "personal/ga/FORGEJO_TOKEN",
+            "--stdin",
+            "--store",
+            "vault",
+        ])
+        .write_stdin(SECRET)
+        .env_remove("VAULT_TOKEN")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        state.lock().unwrap()["personal/ga"].data["FORGEJO_TOKEN"],
+        SECRET
+    );
+    // A folder the policy does not grant: the token may LIST the mount but not read
+    // that folder. `list` leaves it out instead of failing.
+    state.lock().unwrap().insert(
+        "personal/forbidden".into(),
+        KvSecret {
+            custom: serde_json::from_value(json!({"OTHER_KEY": "-"})).unwrap(),
+            ..Default::default()
+        },
+    );
+    let out = env
+        .cmd()
+        .args(["list", "personal/ga", "--json"])
+        .env_remove("VAULT_TOKEN")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["errors"].as_array().unwrap().len(), 0, "{v}");
+    assert!(stdout(&out).contains("personal/ga/FORGEJO_TOKEN"), "{v}");
+
+    // A run with no TTY and no $VAULT_TOKEN: the value reaches the child, the output
+    // is redacted, and the exit code passes through.
+    let out = env
+        .cmd()
+        .args([
+            "run",
+            "-e",
+            "FORGEJO_TOKEN=personal/ga/FORGEJO_TOKEN",
+            "--",
+            "sh",
+            "-c",
+            "test \"$FORGEJO_TOKEN\" = \"$EXPECT\" && echo same=$FORGEJO_TOKEN; exit 7",
+        ])
+        .env("EXPECT", SECRET)
+        .env_remove("VAULT_TOKEN")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(7), "{out:?}");
+    assert_eq!(
+        stdout(&out).trim(),
+        "same=[sealkeep:personal/ga/FORGEJO_TOKEN]",
+        "{out:?}"
+    );
+
+    let out = env
+        .cmd()
+        .args(["list", "--store", "agent", "--json"])
+        .env_remove("VAULT_TOKEN")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        stdout(&out).contains("personal/ga/FORGEJO_TOKEN"),
+        "{out:?}"
+    );
+
+    // The keyring was never opened.
+    assert!(!env.path("keyring.ron").exists());
+
+    std::fs::write(&secret_id, "wrong-secret\n").unwrap();
+    let out = env
+        .cmd()
+        .args(["list", "--store", "vault"])
+        .env_remove("VAULT_TOKEN")
+        .output()
+        .unwrap();
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(e.contains("AppRole login to Vault"), "{e}");
+    assert!(!e.contains("wrong-secret"), "{e}");
+
+    // $VAULT_TOKEN wins over the approle: the operator's own token, with no login.
+    let out = env
+        .cmd()
+        .args(["list", "--store", "vault"])
+        .env("VAULT_TOKEN", "test-token")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        stdout(&out).contains("personal/ga/FORGEJO_TOKEN"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn run_all_goes_on_without_an_unreachable_store_but_not_a_refusing_one() {
+    let env = Env::new();
+    env.set("personal/app/API_KEY", SECRET);
+    // Nothing listens on port 1: the store cannot be reached at all.
+    env.cmd()
+        .args([
+            "store",
+            "add-vault",
+            "vault",
+            "--address",
+            "http://127.0.0.1:1",
+            "--auth",
+            "token",
+        ])
+        .assert()
+        .success();
+    let run = |token: &str| {
+        env.cmd()
+            .args([
+                "run",
+                "--all",
+                "personal/app",
+                "--",
+                "sh",
+                "-c",
+                "test \"$API_KEY\" = \"$EXPECT\"",
+            ])
+            .env("EXPECT", SECRET)
+            .env("VAULT_TOKEN", token)
+            .output()
+            .unwrap()
+    };
+    let out = run("test-token");
+    assert!(out.status.success(), "{out:?}");
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert!(e.contains("store `vault` is unreachable"), "{e}");
+
+    // A Vault that answers but refuses the token still stops --all: the folder may
+    // be missing secrets that only Vault has.
+    let state = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+    let url = serve_fake_vault(state);
+    env.cmd()
+        .args(["store", "remove", "vault"])
+        .assert()
+        .success();
+    env.cmd()
+        .args([
+            "store",
+            "add-vault",
+            "vault",
+            "--address",
+            &url,
+            "--auth",
+            "token",
+        ])
+        .assert()
+        .success();
+    let out = run("wrong");
+    assert!(!out.status.success(), "{out:?}");
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert!(e.contains("cannot list every store"), "{e}");
 }
 
 // ── SSH keys ────────────────────────────────────────────────────────────────
