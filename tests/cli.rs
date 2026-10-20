@@ -1268,3 +1268,92 @@ fn aws_store_against_localstack() {
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["secrets"].as_array().unwrap().len(), 1, "{v}");
 }
+
+/// Start `sealkeep run API_KEY -- sh -c <script>` and wait until the script wrote its pid.
+/// Returns the sealkeep process and the pid of the script.
+fn spawn_run_until_ready(env: &Env, script: &str) -> (std::process::Child, i32) {
+    let mut c = std::process::Command::new(assert_cmd::cargo::cargo_bin("sealkeep"));
+    c.env("SEALKEEP_TEST_KEYRING_FILE", env.path("keyring.ron"))
+        .env("SEALKEEP_CONFIG", env.path("config.toml"))
+        .env("SEALKEEP_AUDIT_LOG", env.path("audit.jsonl"))
+        .env("XDG_RUNTIME_DIR", env.dir.path())
+        .env("READY", env.path("ready"))
+        .env("MARKER", env.path("marker"))
+        .current_dir(env.dir.path())
+        .args(["run", "API_KEY", "--", "sh", "-c", script])
+        .stdout(Stdio::null());
+    let mut sealkeep = c.spawn().unwrap();
+    for _ in 0..200 {
+        if let Ok(s) = std::fs::read_to_string(env.path("ready"))
+            && let Ok(pid) = s.trim().parse()
+        {
+            return (sealkeep, pid);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let _ = sealkeep.kill();
+    let _ = sealkeep.wait();
+    panic!("the command did not start");
+}
+
+/// Wait for sealkeep. Whatever the outcome, kill the script afterwards, so a failing test
+/// leaves nothing behind.
+fn wait_or_kill(mut sealkeep: std::process::Child, script_pid: i32) -> std::process::ExitStatus {
+    let mut status = None;
+    for _ in 0..100 {
+        if let Some(st) = sealkeep.try_wait().unwrap() {
+            status = Some(st);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    unsafe { libc::kill(script_pid, libc::SIGKILL) };
+    let Some(st) = status else {
+        let _ = sealkeep.kill();
+        let _ = sealkeep.wait();
+        panic!("sealkeep did not end after the signal");
+    };
+    st
+}
+
+#[test]
+fn run_forwards_signals_to_the_command_and_waits_for_it() {
+    use std::os::unix::process::ExitStatusExt as _;
+    let env = Env::new();
+    env.set("API_KEY", SECRET);
+
+    // The command catches TERM, writes a marker after a short clean-up, and exits 3.
+    let script = r#"echo $$ > "$READY.tmp"; mv "$READY.tmp" "$READY"
+        trap 'sleep 0.3; echo term > "$MARKER"; exit 3' TERM
+        trap 'echo usr1 > "$MARKER.usr1"' USR1
+        while :; do sleep 0.1; done"#;
+    let (sealkeep, pid) = spawn_run_until_ready(&env, script);
+    unsafe {
+        libc::kill(sealkeep.id() as i32, libc::SIGUSR1);
+    }
+    for _ in 0..100 {
+        if env.path("marker.usr1").exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    unsafe { libc::kill(sealkeep.id() as i32, libc::SIGTERM) };
+    let st = wait_or_kill(sealkeep, pid);
+    // sealkeep waited for the clean-up, and ended with the exit code of the command.
+    assert_eq!(st.code(), Some(3), "{st:?}");
+    assert_eq!(
+        std::fs::read_to_string(env.path("marker")).unwrap().trim(),
+        "term"
+    );
+    assert!(env.path("marker.usr1").exists());
+
+    // A command that does not catch TERM dies from it, and so does sealkeep: it is ended
+    // by TERM, it does not exit with 128 + 15.
+    let _ = std::fs::remove_file(env.path("ready"));
+    let script = r#"echo $$ > "$READY.tmp"; mv "$READY.tmp" "$READY"; exec sleep 30"#;
+    let (sealkeep, pid) = spawn_run_until_ready(&env, script);
+    unsafe { libc::kill(sealkeep.id() as i32, libc::SIGTERM) };
+    let st = wait_or_kill(sealkeep, pid);
+    assert_eq!(st.signal(), Some(libc::SIGTERM), "{st:?}");
+    assert_eq!(st.code(), None);
+}
