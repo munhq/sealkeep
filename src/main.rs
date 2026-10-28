@@ -152,6 +152,10 @@ enum Cmd {
         /// tool call.
         #[arg(long)]
         after: bool,
+        /// Check the built-in rules (the secret stores and the credential files) and
+        /// exit non-zero when one is not refused.
+        #[arg(long, conflicts_with = "after")]
+        check: bool,
     },
     /// Install the skill, the MCP server and the guard hook into the AI clients.
     Install {
@@ -352,7 +356,13 @@ fn dispatch(cmd: Cmd) -> Result<i32> {
         Cmd::Alias { cmd } => alias_cmd(cmd),
         Cmd::Store { cmd } => store_cmd(cmd),
         Cmd::Mcp => mcp::serve().map(|_| 0),
-        Cmd::Guard { client, after } => Ok(if after {
+        Cmd::Guard {
+            client,
+            after,
+            check,
+        } => Ok(if check {
+            guard_check()
+        } else if after {
             guard_after_cmd()
         } else {
             guard_cmd(client)
@@ -952,6 +962,23 @@ fn guard_cmd(client: guard::Client) -> i32 {
     guard::respond(client, guard::check(&v, &cfg))
 }
 
+/// `sealkeep guard --check`: prove that the built-in rules refuse the stores and the
+/// credential files, and that ordinary commands still pass.
+fn guard_check() -> i32 {
+    let cfg = Config::load().unwrap_or_default();
+    let mut failed = false;
+    for (what, ok) in guard::self_test(&cfg) {
+        println!("{} {what}", if ok { "ok  " } else { "FAIL" });
+        failed |= !ok;
+    }
+    if failed {
+        eprintln!("sealkeep guard: a built-in rule is not working; use a newer binary.");
+        1
+    } else {
+        0
+    }
+}
+
 /// The PostToolUse hook. A config or a store that cannot be read lets the result through.
 fn guard_after_cmd() -> i32 {
     let mut input = String::new();
@@ -1097,6 +1124,23 @@ fn doctor() -> Result<i32> {
         if cfg.guard.block_dotenv { "on" } else { "off" },
         cfg.guard.deny.len()
     );
+    let checks = guard::self_test(&cfg);
+    let failed: Vec<&String> = checks
+        .iter()
+        .filter(|(_, ok)| !ok)
+        .map(|(w, _)| w)
+        .collect();
+    if failed.is_empty() {
+        println!(
+            "guard rules: {} checks ok (Kubernetes Secrets, Vault, the store CLIs and credential files)",
+            checks.len()
+        );
+    } else {
+        bad = true;
+        for what in failed {
+            println!("guard rules: ERROR {what}");
+        }
+    }
     for l in install::status()? {
         println!("{l}");
     }

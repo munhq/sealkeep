@@ -444,6 +444,16 @@ fn guard_hook_formats() {
         .stderr(predicates::str::contains("sealkeep run"));
     env.cmd()
         .args(["guard", "--client", "claude"])
+        .write_stdin(
+            json!({"tool_name": "Bash", "tool_input": {"command": "kubectl -n cert-manager get secret cloudflare-api-token -o jsonpath='{.data.api-token}'"}})
+                .to_string(),
+        )
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("kubectl get secret"))
+        .stderr(predicates::str::contains("sealkeep set"));
+    env.cmd()
+        .args(["guard", "--client", "claude"])
         .write_stdin(json!({"tool_name": "Bash", "tool_input": {"command": "ls"}}).to_string())
         .assert()
         .code(0);
@@ -456,6 +466,12 @@ fn guard_hook_formats() {
     assert_eq!(out.status.code(), Some(0));
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["permission"], "deny");
+}
+
+#[test]
+fn guard_checks_its_built_in_rules() {
+    let env = Env::new();
+    env.cmd().args(["guard", "--check"]).assert().success();
 }
 
 #[test]
@@ -622,6 +638,17 @@ fn mcp_lists_and_runs_with_redaction() {
     );
     let r = recv();
     assert!(r.to_string().contains("API_KEY"));
+    assert!(!r.to_string().contains(SECRET));
+
+    // The MCP path runs a command without a shell, so it checks the same store reads.
+    send(
+        json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {
+        "name": "run_with_secrets",
+        "arguments": {"command": ["kubectl", "get", "secret", "cloudflare-api-token"], "secrets": ["API_KEY"]}}}),
+    );
+    let r = recv();
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("kubectl get secret"), "{text}");
     assert!(!r.to_string().contains(SECRET));
 
     drop(stdin);

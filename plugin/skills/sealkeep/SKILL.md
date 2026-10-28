@@ -21,9 +21,9 @@ Examples: `personal/example-app/prod/DATABASE_URL`, `shared/stripe/test/SECRET_K
 ## The rules
 
 1. Before you say that a secret is missing, run `sealkeep list <folder>` (or `sealkeep list`). Look in the folder of the project, then in `shared/`.
-2. Do not ask the person for a value. Do not print a value. Do not run `sealkeep get`, `cat .env`, `secret-tool lookup`, `security find-generic-password -w` or `printenv`. The guard hook refuses these commands.
+2. Do not ask the person for a value. Do not print a value. Do not run `sealkeep get`, `cat .env`, `printenv`, `env`, `set`, `secret-tool lookup`, `security find-generic-password -w`, `kubectl get secret`, `kubectl create token`, `kubectl config view --raw`, `vault kv get`, `vault read`, `ansible-vault view`, `sops -d`, `terraform state pull`, `helm get values`, `docker compose config`, or the read command of another secret store. The guard hook refuses these commands.
 3. Send a secret only to the service it belongs to. Do not write it to a file, a commit, a log, an issue or a message.
-4. If the secret is not in the list, stop. Tell the person the exact name to add, in the convention above: `sealkeep set personal/example-app/prod/NEW_KEY`.
+4. If the secret is not in the list, stop. Tell the person the exact name to add, in the convention above: `sealkeep set personal/example-app/prod/NEW_KEY`. If the value exists only in Kubernetes or Vault, ask the person to put it in sealkeep with that command and use it from there; never pull it from the cluster or the vault yourself.
 
 ## Run a command
 

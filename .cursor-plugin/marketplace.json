@@ -5,7 +5,7 @@
   },
   "metadata": {
     "description": "Let AI agents use secrets without seeing them: inject a secret into one command and redact it from the output.",
-    "version": "0.4.0"
+    "version": "0.5.0"
   },
   "plugins": [
     {
