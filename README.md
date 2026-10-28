@@ -35,7 +35,7 @@ It has four parts:
 
 1. **A CLI** (`sealkeep`): `set`, `list`, `run`, `import`, `scan`, `sync`, aliases and the store commands.
 2. **An MCP server** (`sealkeep mcp`): the tools `list_secrets`, `run_with_secrets` and `store_status`. No tool returns a value.
-3. **A guard hook** (`sealkeep guard`): it refuses the tool calls that would print a secret, for example `cat .env` or `sealkeep get`.
+3. **A guard hook** (`sealkeep guard`): it refuses the tool calls that would print a secret, for example `cat .env`, `sealkeep get`, `kubectl get secret` or `vault kv get`.
 4. **A skill** that tells the agent when and how to use the CLI.
 
 ## Install
@@ -193,7 +193,7 @@ port_forward = ["kubectl", "-n", "vault", "port-forward", "svc/vault", "{port}:8
 
 [guard]
 block_dotenv = true
-deny = ["vault kv get", "ansible-vault view"]
+deny = ["example-secret-cli"]
 ```
 
 ### The OS keyring
@@ -274,12 +274,36 @@ The hook refuses these tool calls, and it tells the agent to use `sealkeep run`:
 1. `sealkeep get`, also inside `$(…)`, backticks and `bash -c`.
 2. A read of the sealkeep keyring entries: `secret-tool lookup service sealkeep …`, `security find-generic-password -s sealkeep … -w`, `keyring get sealkeep …`.
 3. A read of a `.env` file by a shell command or by the Read and Grep tools, when `block_dotenv` is on. `.env.example`, `.env.sample`, `.env.template` and `.env.dist` stay readable.
-4. Each command prefix in `guard.deny`.
+4. A Kubernetes Secret: `kubectl get secret(s)`, `kubectl get sec`, `kubectl get pods,secrets`, `kubectl edit secret`, `kubectl view-secret`, `kubectl get --raw …/secrets/…`, `kubectl config view --raw` and `kubectl create token`. Flags before the verb do not help. `kubectl get pods`, `kubectl describe secret` and `kubectl exec … -- ls` stay allowed. The `kubectl create token` rule does not affect sealkeep's own Vault login: that command runs inside sealkeep, not through the hook.
+5. An environment dump: bare `env`, `printenv`, `set`, `export -p`, `declare -p`, `ps e`/`ps auxe`, and `/proc/*/environ` or `/proc/*/cmdline`. `env FOO=bar <command>` and `set -e` stay allowed.
+6. A keyring read that is not sealkeep: `secret-tool lookup|search` for any service, `security find-generic-password|find-internet-password -w`, `security dump-keychain`, `security export`, `keyring get`, and a `gdbus`, `busctl` or `dbus-send` call to `org.freedesktop.secrets`.
+7. A printed token: `gcloud auth print-access-token|print-identity-token`, `aws configure get aws_secret_access_key|aws_session_token`, `aws sts get-session-token|assume-role`, `aws sso get-role-credentials`, `az account get-access-token`, `gh auth token`, `git credential fill` and a package-manager token read.
+8. A tool that resolves a secret and prints it: `terraform state pull|show`, `terraform output -json|-raw`, `terraform show -json`, `helm get values|manifest|all`, `helm secrets view|dec`, `docker compose config`, `docker inspect`, `docker history`, `pulumi stack output --show-secrets` and `ansible-inventory` (`--list`, `--host`, `--yaml` or no argument).
+9. A read of another secret store: `vault kv get`, `vault kv export`, `vault read` (and `bao`), `ansible-vault view` and `ansible-vault decrypt`, `sops -d`, `sops exec-env`, `aws secretsmanager get-secret-value`, `gcloud secrets versions access`, `az keyvault secret show`, `op read`, `op item get --reveal`, `bw get password`, `bws secret get`, `pass show`, `rbw get` and the other password managers. The write commands and the metadata-only list commands stay allowed.
+10. A credential file: any kubeconfig in `~/.kube` (also one with a name of its own), the files in `~/.aws` (both `credentials` and `config` can hold keys), the Google Cloud and Azure token and config files, `~/.docker/config.json`, `~/.netrc`, `~/.npmrc`, `~/.yarnrc.yml`, `~/.condarc`, `~/.git-credentials`, `~/.vault-token`, `~/.envrc`, `~/.pgpass`, `~/.my.cnf`, `~/.config/sops/age/keys.txt`, `~/.password-store`, `~/.gnupg`, `*.kdbx`, the Terraform, Helm, Pulumi, rclone, Argo CD, glab, Maven, Gradle, NuGet and gem credential files, the browser password and cookie stores, the shell history files, an SSH private key, a Terraform state file (`.tfstate`), and the cluster admin files under `/etc/kubernetes`, `/etc/rancher/k3s` and `/var/lib/kubelet`. Public files such as `id_ed25519.pub`, `~/.ssh/config`, `~/.bashrc` and `~/.config/git/config` stay readable.
+11. The command after `--` in `sealkeep run`, so `sealkeep run KEY -- kubectl get secret x` is refused too.
+12. Each command prefix in `guard.deny`.
 
-Two more layers work for Claude Code:
+The remedy is the one the guard prints: the person stores the value in sealkeep one time (`sealkeep set personal/cloudflare/CF_API_TOKEN`), then the agent uses `sealkeep run personal/cloudflare/CF_API_TOKEN -- …`. The value never goes into the context, and `kubectl` or `vault` is not needed for it.
+
+If the only copy is in Kubernetes or Vault, the person moves it across at a terminal, where the guard does not apply:
+
+```sh
+kubectl -n cert-manager get secret cloudflare-api-token -o jsonpath='{.data.api-token}' \
+  | base64 -d | sealkeep set personal/cloudflare/CF_API_TOKEN --stdin
+vault kv get -field=CF_API_TOKEN agent/personal/cloudflare \
+  | sealkeep set personal/cloudflare/CF_API_TOKEN --stdin
+```
+
+Rotate the source token afterwards if an agent has already seen it. The agent only ever gets the sealkeep name.
+
+`sealkeep guard --check` runs the built-in rules against a set of commands and exits non-zero when one is not refused. `sealkeep doctor` runs the same check with the store and client status.
+
+Three more layers work for Claude Code:
 
 1. **The output guard** (`sealkeep guard --after`, a PostToolUse hook for Bash, Read and Grep). After the tool call, it compares the result with the values of the stored secrets, in the same forms as `run` redaction. When a value is in the result, the hook replaces it with `[sealkeep:NAME]` before the agent reads the result, and it names the secret in a note. This also covers `env > out.txt` followed by a read of `out.txt`, and a glob or a variable in the path. The stores load in parallel with a limit of 4 seconds, and a store that does not answer adds no values. Claude Code records the original output in its own telemetry.
-2. **Deny rules** (`permissions.deny` in `settings.json`). `sealkeep install` adds `Read(**/.env)`, `Read(**/.env.local)`, `Read(**/*.env)` and the rules for the other `.env.*` names. Claude Code checks these rules on the path, so the Read tool and the file commands that it recognizes cannot reach the file by a shell trick. The install adds them when `block_dotenv` is on, and `sealkeep uninstall` removes them.
+2. **Deny rules** (`permissions.deny` in `settings.json`). `sealkeep install` adds `Read(**)` rules for the `.env` and credential files and `Bash(…)` rules for `kubectl get secret`, `vault kv get` and the other commands above. Claude Code checks the path rules on the path, so the Read tool and the file commands that it recognizes cannot reach the file by a shell trick. The install adds the `.env` rules when `block_dotenv` is on, and `sealkeep uninstall` removes all of them.
+3. **The MCP server** runs `run_with_secrets` through the same check, so a command without a shell cannot go around the hook.
 
 ## What sealkeep protects, and what it does not
 
@@ -288,6 +312,8 @@ sealkeep keeps secrets out of the context of the agent, out of the transcript an
 Redaction matches the value, its JSON-escaped form, its percent-encoded form and its base64 forms. A value is redacted when its key looks like a secret (`KEY`, `TOKEN`, `SECRET`, `PASS`, `AUTH` and similar words), when it is a URL with a password, or when it has 16 characters or more. A config value such as `PORT=3000` stays readable. A value that is shorter than 4 characters is not redacted. A command that transforms a value in another way (for example, a hash or a part of the value) can print it in a form that sealkeep does not match.
 
 An agent that can run any shell command as your user can read what your user can read. sealkeep does not change that. It makes the safe path the easy one, it refuses the common paths to a value, and it records each use. Give an agent keys with a small scope: a restricted Stripe key, an OpenRouter key with a spend limit, a test account for a web login.
+
+The guard blocks the standard commands, but it is a guard rail, not a sandbox: an agent that writes its own HTTP client against the Kubernetes API, renames the `kubectl` binary or runs an alias can still reach a value that your account can reach. For a hard boundary, remove the permission as well: give the kubeconfig an RBAC role without `get` on Secrets, and give the agent's Vault token a policy without `read` on the paths that only sealkeep should use. Then the guard is the second line, not the only one.
 
 ## Build and test
 

@@ -1,7 +1,7 @@
 {
   "name": "sealkeep",
   "description": "The sealkeep MCP server, the skill that tells the agent to use secrets by name, and the guard hook that refuses cat .env, sealkeep get and direct keyring reads.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "author": {
     "name": "munhq"
   },

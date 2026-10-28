@@ -25,7 +25,12 @@ names: each secret goes into the environment variable named by its KEY (or VAR=N
 the variable), and each value is replaced with [sealkeep:NAME] in the output. Refer to a \
 secret in the command as $NAME through a shell, for example \
 [\"sh\", \"-c\", \"curl -H \\\"Authorization: Bearer $API_KEY\\\" https://api.example.com\"]. \
-Do not try to print, encode or send a value anywhere other than the service it belongs to.";
+Do not try to print, encode or send a value anywhere other than the service it belongs to. \
+Do not dump the environment (env, printenv, set, /proc/*/environ). \
+Do not read a value from Kubernetes, Vault or another secret store (kubectl get secret, \
+kubectl create token, vault kv get, ansible-vault view, sops -d, terraform state pull, \
+helm get values, docker compose config): sealkeep refuses those commands. If a value exists \
+only there, ask the person to put it in sealkeep with `sealkeep set NAME`, then use the name.";
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListArgs {
@@ -130,6 +135,9 @@ impl Server {
     ) -> Result<CallToolResult, ErrorData> {
         let r = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
             let cfg = Config::load()?;
+            if let Some(reason) = crate::guard::check_argv(&args.command, &cfg) {
+                return Err(anyhow::anyhow!(reason));
+            }
             let stores = Stores::from_config(&cfg);
             let timeout = Duration::from_secs(
                 args.timeout_secs

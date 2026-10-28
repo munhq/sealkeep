@@ -21,10 +21,143 @@ use std::process::Command;
 pub const SKILL: &str = include_str!("../plugin/skills/sealkeep/SKILL.md");
 const MARK: &str = "sealkeep guard";
 
-/// The `permissions.deny` rules of Claude Code for the files that hold secret values.
-/// Claude Code checks them on the path, so a shell trick does not change the result.
-/// `.env.example` and the other template names stay readable.
+/// The `permissions.deny` rules of Claude Code for paths and commands that print a
+/// secret value outside sealkeep. Claude Code checks the Read rules on the path, so a
+/// shell trick does not change the result. `.env.example` and the other template names
+/// stay readable. The Bash rules are a second layer: the guard hook parses the command,
+/// including flags before a verb and `bash -c`.
 const DENY_RULES: &[&str] = &[
+    "Read(**/.kube/**)",
+    "Read(**/.aws/**)",
+    "Read(**/.config/gcloud/**)",
+    "Read(**/.azure/**)",
+    "Read(**/.kube/config)",
+    "Read(**/kubeconfig)",
+    "Read(**/*.kubeconfig)",
+    "Read(**/.aws/credentials)",
+    "Read(**/.docker/config.json)",
+    "Read(**/.netrc)",
+    "Read(**/.npmrc)",
+    "Read(**/.pypirc)",
+    "Read(**/.git-credentials)",
+    "Read(**/.vault-token)",
+    "Read(**/.envrc)",
+    "Read(**/.pgpass)",
+    "Read(**/.my.cnf)",
+    "Read(**/.mongorc.js)",
+    "Read(**/*.kdbx)",
+    "Read(**/.password-store/**)",
+    "Read(**/.gnupg/**)",
+    "Read(**/.config/sops/**)",
+    "Read(**/.config/age/**)",
+    "Read(**/.config/helm/repositories.yaml)",
+    "Read(**/.config/terraform/credentials.tfrc.json)",
+    "Read(**/.terraform.d/credentials.tfrc.json)",
+    "Read(**/.config/pulumi/credentials.json)",
+    "Read(**/.config/rclone/rclone.conf)",
+    "Read(**/.config/argocd/config)",
+    "Read(**/.config/glab-cli/config.yml)",
+    "Read(**/.config/git/credentials)",
+    "Read(**/.m2/**)",
+    "Read(**/.gradle/gradle.properties)",
+    "Read(**/.nuget/**)",
+    "Read(**/.gem/credentials)",
+    "Read(**/.condarc)",
+    "Read(**/.yarnrc.yml)",
+    "Read(**/.bash_history)",
+    "Read(**/.zsh_history)",
+    "Read(**/.local/share/fish/fish_history)",
+    "Read(**/.python_history)",
+    "Read(**/.node_repl_history)",
+    "Read(**/.psql_history)",
+    "Read(**/.mysql_history)",
+    "Read(**/.config/google-chrome/**)",
+    "Read(**/.config/chromium/**)",
+    "Read(**/.config/BraveSoftware/**)",
+    "Read(**/.config/microsoft-edge/**)",
+    "Read(**/.mozilla/firefox/**)",
+    "Read(**/Library/Safari/**)",
+    "Read(**/Login Data)",
+    "Read(**/logins.json)",
+    "Read(**/key4.db)",
+    "Read(**/key3.db)",
+    "Read(**/cookies.sqlite)",
+    "Read(**/signons.sqlite)",
+    "Read(**/k3s.yaml)",
+    "Read(**/admin.conf)",
+    "Read(**/kubelet.conf)",
+    "Read(**/.ssh/id_rsa)",
+    "Read(**/.ssh/id_dsa)",
+    "Read(**/.ssh/id_ecdsa)",
+    "Read(**/.ssh/id_ed25519)",
+    "Read(**/*.tfstate)",
+    "Read(**/*.tfstate.backup)",
+    "Bash(kubectl get secret:*)",
+    "Bash(kubectl get secrets:*)",
+    "Bash(kubectl edit secret:*)",
+    "Bash(kubectl view-secret:*)",
+    "Bash(kubectl config view --raw:*)",
+    "Bash(kubectl create token:*)",
+    "Bash(vault kv get:*)",
+    "Bash(vault kv export:*)",
+    "Bash(vault read:*)",
+    "Bash(ansible-vault view:*)",
+    "Bash(ansible-vault decrypt:*)",
+    "Bash(sops -d:*)",
+    "Bash(sops decrypt:*)",
+    "Bash(env)",
+    "Bash(printenv:*)",
+    "Bash(set)",
+    "Bash(export)",
+    "Bash(export -p)",
+    "Bash(declare)",
+    "Bash(declare -p:*)",
+    "Bash(declare -x)",
+    "Bash(secret-tool lookup:*)",
+    "Bash(secret-tool search:*)",
+    "Bash(keyring get:*)",
+    "Bash(security find-generic-password -w:*)",
+    "Bash(security find-generic-password -g:*)",
+    "Bash(security find-internet-password -w:*)",
+    "Bash(security dump-keychain:*)",
+    "Bash(security export:*)",
+    "Bash(gcloud auth print-access-token:*)",
+    "Bash(gcloud auth print-identity-token:*)",
+    "Bash(aws configure get aws_secret_access_key:*)",
+    "Bash(aws configure get aws_session_token:*)",
+    "Bash(aws sts get-session-token:*)",
+    "Bash(aws sts assume-role:*)",
+    "Bash(aws sso get-role-credentials:*)",
+    "Bash(az account get-access-token:*)",
+    "Bash(gh auth token:*)",
+    "Bash(gh auth status --show-token:*)",
+    "Bash(git credential fill:*)",
+    "Bash(git credential-manager get:*)",
+    "Bash(terraform state pull:*)",
+    "Bash(terraform state show:*)",
+    "Bash(terraform output -json:*)",
+    "Bash(terraform output -raw:*)",
+    "Bash(terraform show -json:*)",
+    "Bash(helm get values:*)",
+    "Bash(helm get manifest:*)",
+    "Bash(helm get all:*)",
+    "Bash(helm secrets view:*)",
+    "Bash(helm secrets dec:*)",
+    "Bash(docker compose config:*)",
+    "Bash(docker-compose config:*)",
+    "Bash(docker inspect:*)",
+    "Bash(docker history:*)",
+    "Bash(podman inspect:*)",
+    "Bash(podman history:*)",
+    "Bash(pulumi stack output --show-secrets:*)",
+    "Bash(ansible-inventory --list:*)",
+    "Bash(ansible-inventory --host:*)",
+    "Bash(ansible-inventory --yaml:*)",
+    "Bash(ansible-inventory)",
+];
+
+/// The `.env` rules, which follow `guard.block_dotenv`.
+const DOTENV_DENY_RULES: &[&str] = &[
     "Read(**/.env)",
     "Read(**/.env.local)",
     "Read(**/.env.development)",
@@ -268,8 +401,9 @@ fn add_posttool_hook(ctx: &Ctx, path: &Path, matcher: &str) -> Result<String> {
     })
 }
 
-/// Claude Code: `permissions.deny` rules for the `.env` files.
-fn add_deny_rules(ctx: &Ctx, path: &Path) -> Result<String> {
+/// Claude Code: `permissions.deny` rules for the credential files and the commands that
+/// read another secret store, plus the `.env` rules when `block_dotenv` is on.
+fn add_deny_rules(ctx: &Ctx, path: &Path, block_dotenv: bool) -> Result<String> {
     let changed = edit_json(ctx, path, |v| {
         let list = v
             .as_object_mut()
@@ -283,7 +417,8 @@ fn add_deny_rules(ctx: &Ctx, path: &Path) -> Result<String> {
             .as_array_mut()
             .context("`permissions.deny` is not a list")?;
         let mut changed = false;
-        for rule in DENY_RULES {
+        let extra: &[&str] = if block_dotenv { DOTENV_DENY_RULES } else { &[] };
+        for rule in DENY_RULES.iter().chain(extra.iter()) {
             if !list.iter().any(|r| r.as_str() == Some(rule)) {
                 list.push(json!(rule));
                 changed = true;
@@ -293,9 +428,9 @@ fn add_deny_rules(ctx: &Ctx, path: &Path) -> Result<String> {
     })?;
     Ok(if changed {
         let verb = if ctx.dry_run { "would add" } else { "added" };
-        format!("{verb} the .env deny rules to {}", path.display())
+        format!("{verb} the deny rules to {}", path.display())
     } else {
-        format!("the .env deny rules are already in {}", path.display())
+        format!("the deny rules are already in {}", path.display())
     })
 }
 
@@ -311,7 +446,10 @@ fn remove_deny_rules(ctx: &Ctx, path: &Path) -> Result<bool> {
             return Ok(false);
         };
         let before = list.len();
-        list.retain(|r| !r.as_str().is_some_and(|r| DENY_RULES.contains(&r)));
+        list.retain(|r| {
+            !r.as_str()
+                .is_some_and(|r| DENY_RULES.contains(&r) || DOTENV_DENY_RULES.contains(&r))
+        });
         Ok(list.len() != before)
     })
 }
@@ -574,9 +712,9 @@ pub fn apply(ctx: &Ctx, clients: &[ClientId], add: bool) -> Result<Vec<String>> 
                                 label.clone(),
                                 add_posttool_hook(ctx, &settings, "Bash|Read|Grep"),
                             );
-                            if Config::load().unwrap_or_default().guard.block_dotenv {
-                                push(label.clone(), add_deny_rules(ctx, &settings));
-                            }
+                            let block_dotenv =
+                                Config::load().unwrap_or_default().guard.block_dotenv;
+                            push(label.clone(), add_deny_rules(ctx, &settings, block_dotenv));
                         } else {
                             let post = remove_hooks(ctx, &settings, "PostToolUse");
                             let deny = remove_deny_rules(ctx, &settings);
@@ -777,7 +915,7 @@ mod tests {
         let c = ctx();
         for _ in 0..2 {
             add_posttool_hook(&c, &path, "Bash|Read|Grep").unwrap();
-            add_deny_rules(&c, &path).unwrap();
+            add_deny_rules(&c, &path, true).unwrap();
         }
         let v = read_json(&path).unwrap();
         let post = v.pointer("/hooks/PostToolUse").unwrap().as_array().unwrap();
@@ -787,7 +925,7 @@ mod tests {
             "/opt/bin/sealkeep guard --client claude --after"
         );
         let deny = v.pointer("/permissions/deny").unwrap().as_array().unwrap();
-        assert_eq!(deny.len(), 1 + DENY_RULES.len());
+        assert_eq!(deny.len(), 1 + DENY_RULES.len() + DOTENV_DENY_RULES.len());
         assert_eq!(deny[0], "Bash(rm -rf *)");
 
         assert!(remove_hooks(&c, &path, "PostToolUse").unwrap());
