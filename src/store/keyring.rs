@@ -14,13 +14,15 @@ use anyhow::{Context, Result, anyhow};
 use keyring_core::{Entry, Error as KeyringError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 const INDEX_USER: &str = "__index__";
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
+/// How long a store keeps the lock state that it read.
+const LOCK_STATE_TTL: Duration = Duration::from_secs(30);
 
 /// 0 means: read `SEALKEEP_KEYRING_TIMEOUT`.
 static TIMEOUT_SECS: AtomicU64 = AtomicU64::new(0);
@@ -162,10 +164,6 @@ pub fn default_locked() -> Result<Option<bool>> {
     }
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     Ok(None)
-}
-
-fn ensure_unlocked() -> Result<()> {
-    ensure_unlocked_state(default_locked()?)
 }
 
 fn ensure_unlocked_state(locked: Option<bool>) -> Result<()> {
@@ -312,17 +310,43 @@ struct IndexEntry {
 pub struct KeyringStore {
     name: String,
     service: String,
+    /// The lock state of the default collection and when it was read. Each check opens a
+    /// D-Bus connection and a Secret Service session. The post-tool guard reads every
+    /// secret on each tool call, so a check for each secret opened about 560 sessions per
+    /// call, and gnome-keyring-daemon 48.0 aborted when a client left during the session
+    /// negotiation (`plain_negotiate: assertion 'session' failed`, a core dump on
+    /// 2026-10-30 and on 2026-10-31). A new daemon starts locked.
+    lock_state: Mutex<Option<(Instant, Option<bool>)>>,
 }
 
 impl KeyringStore {
     pub fn new(name: String, service: String) -> Self {
-        Self { name, service }
+        Self {
+            name,
+            service,
+            lock_state: Mutex::new(None),
+        }
+    }
+
+    /// `ensure_unlocked` with the state of the last `LOCK_STATE_TTL`. A failed check is
+    /// not kept, so the next call checks again.
+    fn ensure_unlocked(&self) -> Result<()> {
+        let mut state = self.lock_state.lock().unwrap_or_else(|e| e.into_inner());
+        let locked = match *state {
+            Some((at, locked)) if at.elapsed() < LOCK_STATE_TTL => locked,
+            _ => {
+                let locked = default_locked()?;
+                *state = Some((Instant::now(), locked));
+                locked
+            }
+        };
+        ensure_unlocked_state(locked)
     }
 
     fn index(&self) -> Result<Index> {
         // `list` reads the index, so a locked keyring must fail here as well:
         // the unlock prompt on the desktop is not answerable by a headless caller.
-        ensure_unlocked()?;
+        self.ensure_unlocked()?;
         match read(&self.service, INDEX_USER)? {
             Some(text) => {
                 serde_json::from_str(&text).context("the keyring index is not valid JSON")
@@ -365,7 +389,7 @@ impl Store for KeyringStore {
         // collection is locked. In headless callers that prompt cannot be
         // answered, so fail here and let multi-store lookup continue to its
         // next backend (for example Vault).
-        ensure_unlocked()?;
+        self.ensure_unlocked()?;
         read(&self.service, name)
     }
 
