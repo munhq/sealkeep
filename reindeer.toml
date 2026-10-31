@@ -1,0 +1,13 @@
+# reindeer makes third-party/BUCK from third-party/Cargo.toml, which scripts/buck/gen_buck.py writes (buck/rust/ of munhq/desk, #113).
+third_party_dir = "third-party"
+vendor = false
+
+[buck]
+file_name = "BUCK"
+rust_library = "cargo.rust_library"
+rust_binary = "cargo.rust_binary"
+buildscript_genrule = "buildscript_run"
+buckfile_imports = """
+load("@prelude//rust:cargo_buildscript.bzl", "buildscript_run")
+load("@prelude//rust:cargo_package.bzl", "cargo")
+"""

@@ -1,0 +1,57 @@
+# The toolchains of a Rust build of desk (buck/rust/ of munhq/desk, #97, #113). The C tools have absolute paths: the prelude starts the
+# compiler of a Cargo build script with os.execl (rust/tools/from_any_dir.py), and os.execl does not search PATH.
+load("@prelude//tests:test_toolchain.bzl", "noop_test_toolchain")
+load("@prelude//toolchains:cxx.bzl", "system_cxx_toolchain")
+load("@prelude//toolchains:genrule.bzl", "system_genrule_toolchain")
+load("@prelude//toolchains:python.bzl", "remote_python_toolchain", "system_python_bootstrap_toolchain")
+load("@prelude//toolchains:remote_test_execution.bzl", "remote_test_execution_toolchain")
+load("@prelude//toolchains:rust.bzl", "system_rust_toolchain")
+load("@prelude//toolchains:zip_file.bzl", "zip_file_toolchain")
+
+# gcc as in a cargo build on Linux. With a clang compiler_type, the prelude passes clang an --ld-path shim that is
+# clang++ again (rust/cargo_buildscript.bzl), and a build script that links a test program gets the start files
+# two times (aws-lc-sys: "duplicate symbol: _init"). lld links, as the prelude does for clang.
+system_cxx_toolchain(
+    name = "cxx",
+    archiver = "/usr/bin/ar",
+    compiler = "/usr/bin/gcc",
+    compiler_type = "gcc",
+    cxx_compiler = "/usr/bin/g++",
+    link_flags = ["-fuse-ld=lld"],
+    linker = "/usr/bin/g++",
+    visibility = ["PUBLIC"],
+)
+
+system_genrule_toolchain(name = "genrule", visibility = ["PUBLIC"])
+
+remote_python_toolchain(name = "python", bootstrap = False, visibility = ["PUBLIC"])
+
+system_python_bootstrap_toolchain(name = "python_bootstrap", visibility = ["PUBLIC"])
+
+# scripts/check.sh writes the version of rustc into desk.toolchain. As an extra -Cmetadata it goes into the key of each
+# Rust action and into the hash of each crate, so the cache never gives a result of another compiler (munhq/desk#97).
+# `-c desk.profile=release` (scripts/release.sh) builds with the flags of [rust_release] in the .buckconfig of the
+# repository: `rustc_flags` for every crate, `rustc_binary_flags` for the binaries, as [profile.release] of its
+# Cargo.toml. The flags go into the key of each action, so a release build and a check never share a result.
+_RELEASE = read_root_config("desk", "profile", "dev") == "release"
+
+# The parallel front end of rustc: the type check and the borrow check of one crate run on 8 threads. A rebuild of
+# munbot-engine took 44 s with it and 148 s without it (2026-10-24, one machine). It links on nightly-2026-10-23, the
+# toolchain of the runner image; on nightly-2026-02-16 the links of the test binaries failed.
+_THREADS = ["-Zthreads=8"]
+
+system_rust_toolchain(
+    name = "rust",
+    default_edition = "2021",
+    rustc_flags = ["-Cmetadata=toolchain:" + read_root_config("desk", "toolchain", "unknown")] + _THREADS + (
+        read_root_config("rust_release", "rustc_flags", "").split() if _RELEASE else []
+    ),
+    rustc_binary_flags = read_root_config("rust_release", "rustc_binary_flags", "").split() if _RELEASE else [],
+    visibility = ["PUBLIC"],
+)
+
+remote_test_execution_toolchain(name = "remote_test_execution", visibility = ["PUBLIC"])
+
+noop_test_toolchain(name = "test", visibility = ["PUBLIC"])
+
+zip_file_toolchain(name = "zip_file", visibility = ["PUBLIC"])
