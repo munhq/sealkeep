@@ -133,6 +133,9 @@ impl Prepared {
     /// redacted on their way to the terminal. Returns the exit code.
     pub fn run_streamed(self) -> Result<i32> {
         self.log(None)?;
+        // Before the spawn, so that no signal falls in the gap: it is passed on after.
+        #[cfg(unix)]
+        let forward = forward::Forward::install();
         let mut child = self
             .command()
             .stdin(Stdio::inherit())
@@ -140,18 +143,31 @@ impl Prepared {
             .stderr(Stdio::piped())
             .spawn()
             .with_context(|| format!("start `{}`", self.spec.argv[0]))?;
+        #[cfg(unix)]
+        forward.attach(child.id() as i32);
         let out = child.stdout.take().expect("stdout is piped");
         let err = child.stderr.take().expect("stderr is piped");
         let status = std::thread::scope(|s| {
             let r = &self.redactor;
             let a = s.spawn(move || pump(r, out, std::io::stdout()));
             let b = s.spawn(move || pump(r, err, std::io::stderr()));
+            #[cfg(unix)]
+            forward.detach_when_exited(child.id() as i32);
             let status = child.wait();
             let _ = a.join();
             let _ = b.join();
             status
         })?;
         drop(self.dotenv);
+        // The command died from a signal: die from it too, so that whoever started
+        // sealkeep (a shell, systemd, launchd) sees a stop by that signal, not an exit code.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt as _;
+            if let Some(sig) = status.signal() {
+                forward::die_from(sig);
+            }
+        }
         Ok(exit_code(status))
     }
 
@@ -222,6 +238,152 @@ impl Prepared {
             truncated: stdout.1 || stderr.1,
             timed_out,
         })
+    }
+}
+
+/// Pass the signals that a service manager or a user sends to sealkeep on to the command,
+/// and keep waiting for it. sealkeep has to stay: it redacts the output, and removes the
+/// dotenv file when the command ends. Without this, TERM would kill sealkeep and leave
+/// the command running, with its output pipes closed.
+///
+/// The command stays in the process group of sealkeep, so it keeps its terminal. The
+/// terminal sends INT and QUIT to the whole foreground group, so when sealkeep is in the
+/// foreground group they are not passed on as well: the command would see them twice.
+///
+/// When the command dies from a signal, sealkeep does the same (`die_from`) instead of
+/// exiting with 128+n, as dumb-init does.
+#[cfg(unix)]
+mod forward {
+    use std::sync::atomic::{AtomicI32, AtomicU32, Ordering::Relaxed};
+
+    const SIGNALS: [libc::c_int; 6] = [
+        libc::SIGTERM,
+        libc::SIGINT,
+        libc::SIGHUP,
+        libc::SIGQUIT,
+        libc::SIGUSR1,
+        libc::SIGUSR2,
+    ];
+
+    static CHILD: AtomicI32 = AtomicI32::new(0);
+    /// Signals (as bits) that came in before the command had a pid.
+    static EARLY: AtomicU32 = AtomicU32::new(0);
+    /// Signals (as bits) that the terminal already delivered to the command.
+    static FROM_TERMINAL: AtomicU32 = AtomicU32::new(0);
+
+    extern "C" fn handler(sig: libc::c_int) {
+        let bit = 1u32 << sig;
+        if FROM_TERMINAL.load(Relaxed) & bit != 0 {
+            return;
+        }
+        let pid = CHILD.load(Relaxed);
+        if pid > 0 {
+            // kill(2) is async-signal-safe.
+            unsafe { libc::kill(pid, sig) };
+        } else {
+            EARLY.fetch_or(bit, Relaxed);
+        }
+    }
+
+    pub struct Forward {
+        saved: Vec<(libc::c_int, libc::sigaction)>,
+    }
+
+    impl Forward {
+        pub fn install() -> Self {
+            if in_foreground_group() {
+                FROM_TERMINAL.store(1 << libc::SIGINT | 1 << libc::SIGQUIT, Relaxed);
+            }
+            let mut saved = Vec::new();
+            for sig in SIGNALS {
+                unsafe {
+                    let mut old: libc::sigaction = std::mem::zeroed();
+                    if libc::sigaction(sig, std::ptr::null(), &mut old) != 0
+                        || old.sa_sigaction == libc::SIG_IGN
+                    {
+                        // Keep a signal that was ignored on purpose (`nohup`) ignored.
+                        continue;
+                    }
+                    let mut new: libc::sigaction = std::mem::zeroed();
+                    new.sa_sigaction = handler as extern "C" fn(libc::c_int) as usize;
+                    new.sa_flags = libc::SA_RESTART;
+                    libc::sigemptyset(&mut new.sa_mask);
+                    if libc::sigaction(sig, &new, std::ptr::null_mut()) == 0 {
+                        saved.push((sig, old));
+                    }
+                }
+            }
+            Self { saved }
+        }
+
+        /// From now on, signals go to `pid`; the ones that came in before go now.
+        pub fn attach(&self, pid: i32) {
+            CHILD.store(pid, Relaxed);
+            let early = EARLY.swap(0, Relaxed);
+            for sig in SIGNALS {
+                if early & (1 << sig) != 0 {
+                    unsafe { libc::kill(pid, sig) };
+                }
+            }
+        }
+
+        /// Block until the command has ended, without reaping it, and stop forwarding.
+        /// The pid stays ours until `wait` reaps it, so no signal can hit a new process
+        /// that got the same pid.
+        pub fn detach_when_exited(&self, pid: i32) {
+            unsafe {
+                let mut info: libc::siginfo_t = std::mem::zeroed();
+                while libc::waitid(
+                    libc::P_PID,
+                    pid as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOWAIT,
+                ) != 0
+                    && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+                {
+                }
+            }
+            CHILD.store(0, Relaxed);
+        }
+    }
+
+    impl Drop for Forward {
+        fn drop(&mut self) {
+            CHILD.store(0, Relaxed);
+            for (sig, old) in &self.saved {
+                unsafe { libc::sigaction(*sig, old, std::ptr::null_mut()) };
+            }
+        }
+    }
+
+    /// Raise `sig` on this process with the default action. Returns only if the signal
+    /// did not end the process (one whose default is to be ignored); the caller then
+    /// exits with 128+n.
+    pub fn die_from(sig: libc::c_int) {
+        unsafe {
+            let mut dfl: libc::sigaction = std::mem::zeroed();
+            dfl.sa_sigaction = libc::SIG_DFL;
+            libc::sigemptyset(&mut dfl.sa_mask);
+            libc::sigaction(sig, &dfl, std::ptr::null_mut());
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, sig);
+            libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+            libc::raise(sig);
+        }
+    }
+
+    /// Is sealkeep in the foreground process group of its controlling terminal?
+    fn in_foreground_group() -> bool {
+        unsafe {
+            let fd = libc::open(c"/dev/tty".as_ptr(), libc::O_RDONLY | libc::O_NOCTTY);
+            if fd < 0 {
+                return false;
+            }
+            let fg = libc::tcgetpgrp(fd);
+            libc::close(fd);
+            fg == libc::getpgrp()
+        }
     }
 }
 
