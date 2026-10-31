@@ -5,5 +5,38 @@
   "server": {
     "url": "https://desk.munhq.com",
     "tokenEnv": "DESK_TOKEN"
-  }
+  },
+  "validation": [
+    {
+      "name": "fmt",
+      "command": "cargo fmt --check",
+      "paths": [
+        "src/**",
+        "tests/**"
+      ],
+      "timeoutMinutes": 10
+    },
+    {
+      "name": "clippy",
+      "command": "cargo clippy --locked --all-targets --features test-store -- -D warnings",
+      "paths": [
+        "src/**",
+        "tests/**",
+        "Cargo.toml",
+        "Cargo.lock"
+      ],
+      "timeoutMinutes": 20
+    },
+    {
+      "name": "test",
+      "command": "cargo test --locked --features test-store",
+      "paths": [
+        "src/**",
+        "tests/**",
+        "Cargo.toml",
+        "Cargo.lock"
+      ],
+      "timeoutMinutes": 20
+    }
+  ]
 }
