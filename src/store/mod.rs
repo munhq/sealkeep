@@ -16,6 +16,33 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 
+/// A store that could not be reached at all (no connection, DNS, proxy, TLS), as
+/// opposed to one that answered with an error. `run --all` goes on without such a
+/// store when another store could list, so a laptop off the network still runs from
+/// its keyring copy; a store that refuses (403, no token) still stops it.
+#[derive(Debug)]
+pub struct Unreachable {
+    pub what: String,
+    pub source: Box<dyn std::error::Error + Send + Sync>,
+}
+
+impl std::fmt::Display for Unreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "reach {}", self.what)
+    }
+}
+
+impl std::error::Error for Unreachable {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+/// Whether `e` (or a cause of it) is an [`Unreachable`].
+pub fn is_unreachable(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.downcast_ref::<Unreachable>().is_some())
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SecretInfo {
     pub store: String,
@@ -185,12 +212,22 @@ impl Stores {
 
     /// The names in every store and the aliases. A store that fails adds an error line.
     pub fn list_all(&self) -> (Vec<SecretInfo>, Vec<String>) {
+        let (all, errors) = self.list_each();
+        let errors = errors
+            .into_iter()
+            .map(|(store, e)| format!("{store}: {e:#}"))
+            .collect();
+        (all, errors)
+    }
+
+    /// `list_all`, with each failing store and its error.
+    fn list_each(&self) -> (Vec<SecretInfo>, Vec<(String, anyhow::Error)>) {
         let mut all = Vec::new();
         let mut errors = Vec::new();
         for s in &self.stores {
             match s.list() {
                 Ok(mut l) => all.append(&mut l),
-                Err(e) => errors.push(format!("{}: {e:#}", s.name())),
+                Err(e) => errors.push((s.name().to_string(), e)),
             }
         }
         for (alias, target) in &self.aliases {
@@ -217,10 +254,20 @@ impl Stores {
         names::check_prefix(folder)?;
         let (items, errors) = match store {
             Some(s) => (self.by_name(s)?.list()?, Vec::new()),
-            None => self.list_all(),
+            None => self.list_each(),
         };
-        if !errors.is_empty() {
-            bail!("cannot list every store: {}", errors.join("; "));
+        // Go on without the stores that could not be reached, when another store
+        // listed: the keyring copy on a laptop off the network. Any other failure
+        // (refused, no token) stops, since the folder may be missing secrets.
+        let refused: Vec<_> = errors.iter().filter(|(_, e)| !is_unreachable(e)).collect();
+        if !refused.is_empty() || (!errors.is_empty() && errors.len() == self.stores.len()) {
+            let lines: Vec<_> = errors.iter().map(|(s, e)| format!("{s}: {e:#}")).collect();
+            bail!("cannot list every store: {}", lines.join("; "));
+        }
+        for (s, e) in &errors {
+            eprintln!(
+                "sealkeep: store `{s}` is unreachable, so --all uses the other stores: {e:#}"
+            );
         }
         let mut by_key: HashMap<String, String> = HashMap::new();
         let mut out = Vec::new();

@@ -241,6 +241,18 @@ enum StoreCmd {
         role: Option<String>,
         #[arg(long, default_value = "kubernetes")]
         k8s_auth_mount: String,
+        /// The AppRole auth mount, for --auth approle.
+        #[arg(long, default_value = "approle")]
+        approle_mount: String,
+        /// The file with the AppRole role ID, for --auth approle.
+        #[arg(long)]
+        role_id_file: Option<String>,
+        /// The file with the AppRole secret ID, for --auth approle.
+        #[arg(long)]
+        secret_id_file: Option<String>,
+        /// The file with a Vault token that another program keeps fresh, for --auth token-file.
+        #[arg(long)]
+        token_file: Option<String>,
         /// The command that prints a ServiceAccount JWT, as one shell-split string.
         #[arg(long)]
         jwt_command: Option<String>,
@@ -291,6 +303,8 @@ enum StoreCmd {
 enum AuthArg {
     Token,
     Kubernetes,
+    Approle,
+    TokenFile,
 }
 
 fn main() {
@@ -882,6 +896,10 @@ fn store_cmd(cmd: StoreCmd) -> Result<i32> {
             auth,
             role,
             k8s_auth_mount,
+            approle_mount,
+            role_id_file,
+            secret_id_file,
+            token_file,
             jwt_command,
             port_forward,
         } => cfg.stores.push(StoreConfig::Vault {
@@ -891,9 +909,15 @@ fn store_cmd(cmd: StoreCmd) -> Result<i32> {
             auth: match auth {
                 AuthArg::Token => VaultAuth::Token,
                 AuthArg::Kubernetes => VaultAuth::Kubernetes,
+                AuthArg::Approle => VaultAuth::Approle,
+                AuthArg::TokenFile => VaultAuth::TokenFile,
             },
             role,
             k8s_auth_mount,
+            approle_mount,
+            role_id_file,
+            secret_id_file,
+            token_file,
             jwt_command: jwt_command
                 .as_deref()
                 .map(split_command)

@@ -5,13 +5,16 @@
 //! The `custom_metadata` of each secret lists its keys with their descriptions, so
 //! `list` reads metadata only and no value.
 //!
-//! Auth: a token (`$VAULT_TOKEN` or the keyring entry `vault-token:<store>`), or a
+//! `$VAULT_TOKEN`, when set, is used whatever the auth method. Otherwise:
+//! a token (the keyring entry `vault-token:<store>`), a
 //! Kubernetes ServiceAccount JWT from `jwt_command` that Vault exchanges for a token that
-//! lives for the TTL of its role. `port_forward` reaches a Vault that has no address
+//! lives for the TTL of its role, an AppRole whose role ID and secret ID are in files, or
+//! a token file that another program (a vault-agent sink) keeps fresh. The last two need
+//! no keyring, so a store of either kind works on a machine with no desktop session. `port_forward` reaches a Vault that has no address
 //! outside its cluster, through the Kubernetes API that the kubeconfig already reaches.
 
-use super::{SecretInfo, Store, keyring};
-use crate::config::{DEFAULT_KEYRING_SERVICE, StoreConfig, VaultAuth};
+use super::{SecretInfo, Store, Unreachable, keyring};
+use crate::config::{self, DEFAULT_KEYRING_SERVICE, StoreConfig, VaultAuth};
 use crate::names;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Map, Value, json};
@@ -20,6 +23,14 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use ureq::Agent;
+
+/// A transport failure (no connection, DNS, proxy, TLS) as an [`Unreachable`].
+fn unreachable(base: &str, e: ureq::Error) -> anyhow::Error {
+    anyhow::Error::new(Unreachable {
+        what: format!("Vault at {base}"),
+        source: Box::new(e),
+    })
+}
 
 /// The custom_metadata value of a key with no description.
 const NO_DESCRIPTION: &str = "-";
@@ -31,6 +42,10 @@ pub struct VaultStore {
     auth: VaultAuth,
     role: Option<String>,
     k8s_auth_mount: String,
+    approle_mount: String,
+    role_id_file: Option<String>,
+    secret_id_file: Option<String>,
+    token_file: Option<String>,
     jwt_command: Vec<String>,
     port_forward: Vec<String>,
     agent: Agent,
@@ -70,6 +85,20 @@ fn reply_error(status: u16, body: &str) -> anyhow::Error {
     }
 }
 
+/// The trimmed content of a credential file named in the config. The error names the
+/// file, never its content.
+fn read_secret_file(path: Option<&str>, field: &str) -> Result<String> {
+    let path = path.with_context(|| format!("the store has no `{field}`"))?;
+    let p = config::expand_home(path);
+    let text =
+        std::fs::read_to_string(&p).with_context(|| format!("read the {field} {}", p.display()))?;
+    let text = text.trim();
+    if text.is_empty() {
+        bail!("the {field} {} is empty", p.display());
+    }
+    Ok(text.to_string())
+}
+
 fn free_port() -> Result<u16> {
     let l = TcpListener::bind("127.0.0.1:0").context("find a free local port")?;
     Ok(l.local_addr()?.port())
@@ -84,6 +113,10 @@ impl VaultStore {
             auth,
             role,
             k8s_auth_mount,
+            approle_mount,
+            role_id_file,
+            secret_id_file,
+            token_file,
             jwt_command,
             port_forward,
         } = cfg
@@ -104,6 +137,10 @@ impl VaultStore {
             auth,
             role,
             k8s_auth_mount,
+            approle_mount,
+            role_id_file,
+            secret_id_file,
+            token_file,
             jwt_command,
             port_forward,
             agent,
@@ -151,22 +188,44 @@ impl VaultStore {
         }
     }
 
+    /// Exchange a login body at `auth/<mount>/login` for a client token.
+    fn login_at(&self, base: &str, mount: &str, body: Value, what: &str) -> Result<String> {
+        let mut resp = self
+            .agent
+            .post(format!("{base}/v1/auth/{mount}/login"))
+            .send_json(body)
+            .map_err(|e| unreachable(base, e))?;
+        let status = resp.status().as_u16();
+        let body = resp.body_mut().read_to_string().unwrap_or_default();
+        if status != 200 {
+            return Err(reply_error(status, &body)).context(format!("{what} login to Vault"));
+        }
+        let v: Value = serde_json::from_str(&body)?;
+        v.pointer("/auth/client_token")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .context("the Vault login reply has no client_token")
+    }
+
     fn login(&self, base: &str) -> Result<String> {
+        // $VAULT_TOKEN wins over every auth method, as with the vault CLI: an operator
+        // with a personal token writes through a store whose own auth is read-only.
+        if let Ok(t) = std::env::var("VAULT_TOKEN")
+            && !t.is_empty()
+        {
+            return Ok(t);
+        }
         match self.auth {
-            VaultAuth::Token => {
-                if let Ok(t) = std::env::var("VAULT_TOKEN")
-                    && !t.is_empty()
-                {
-                    return Ok(t);
-                }
-                keyring::read(DEFAULT_KEYRING_SERVICE, &Self::token_user(&self.name))?
-                    .with_context(|| {
-                        format!(
-                            "store `{}` has no token: set $VAULT_TOKEN, or run `sealkeep store token {}`",
-                            self.name, self.name
-                        )
-                    })
-            }
+            VaultAuth::Token => keyring::read(
+                DEFAULT_KEYRING_SERVICE,
+                &Self::token_user(&self.name),
+            )?
+            .with_context(|| {
+                format!(
+                    "store `{}` has no token: set $VAULT_TOKEN, or run `sealkeep store token {}`",
+                    self.name, self.name
+                )
+            }),
             VaultAuth::Kubernetes => {
                 let out = Command::new(&self.jwt_command[0])
                     .args(&self.jwt_command[1..])
@@ -180,27 +239,41 @@ impl VaultStore {
                     );
                 }
                 let jwt = String::from_utf8(out.stdout)?.trim().to_string();
-                let mut resp = self
-                    .agent
-                    .post(format!("{base}/v1/auth/{}/login", self.k8s_auth_mount))
-                    .send_json(json!({ "role": self.role, "jwt": jwt }))
-                    .with_context(|| format!("reach Vault at {base}"))?;
-                let status = resp.status().as_u16();
-                let body = resp.body_mut().read_to_string().unwrap_or_default();
-                if status != 200 {
-                    return Err(reply_error(status, &body)).context("Kubernetes login to Vault");
-                }
-                let v: Value = serde_json::from_str(&body)?;
-                v.pointer("/auth/client_token")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .context("the Vault login reply has no client_token")
+                self.login_at(
+                    base,
+                    &self.k8s_auth_mount,
+                    json!({ "role": self.role, "jwt": jwt }),
+                    "Kubernetes",
+                )
             }
+            VaultAuth::Approle => {
+                let role_id = read_secret_file(self.role_id_file.as_deref(), "role_id_file")?;
+                let secret_id = read_secret_file(self.secret_id_file.as_deref(), "secret_id_file")?;
+                self.login_at(
+                    base,
+                    &self.approle_mount,
+                    json!({ "role_id": role_id, "secret_id": secret_id }),
+                    "AppRole",
+                )
+            }
+            VaultAuth::TokenFile => read_secret_file(self.token_file.as_deref(), "token_file"),
         }
     }
 
     /// Call Vault. Opens the port forward and signs in on the first call.
     fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<(u16, Value)> {
+        self.call_with(method, path, body, false)
+    }
+
+    /// `call`, where `denied_ok` turns a 403 into `Ok((403, Null))`: a token whose policy
+    /// covers some folders of the mount can still list the folders it may read.
+    fn call_with(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+        denied_ok: bool,
+    ) -> Result<(u16, Value)> {
         let mut guard = self
             .conn
             .lock()
@@ -236,9 +309,12 @@ impl VaultStore {
                 .send_empty(),
             (m, _) => bail!("method {m} is not used"),
         }
-        .with_context(|| format!("reach Vault at {}", conn.base))?;
+        .map_err(|e| unreachable(&conn.base, e))?;
         let status = resp.status().as_u16();
         let text = resp.body_mut().read_to_string().unwrap_or_default();
+        if denied_ok && status == 403 {
+            return Ok((status, Value::Null));
+        }
         if status >= 400 && status != 404 {
             return Err(reply_error(status, &text)).with_context(|| format!("{method} {path}"));
         }
@@ -292,8 +368,19 @@ impl VaultStore {
     }
 
     fn read_meta(&self, folder: &str) -> Result<Option<Meta>> {
-        let (status, v) = self.call("GET", &format!("{}/metadata/{folder}", self.mount), None)?;
-        if status == 404 {
+        self.read_meta_with(folder, false)
+    }
+
+    /// The metadata of a folder; `None` when it does not exist, or (with `denied_ok`)
+    /// when the token may not read it.
+    fn read_meta_with(&self, folder: &str, denied_ok: bool) -> Result<Option<Meta>> {
+        let (status, v) = self.call_with(
+            "GET",
+            &format!("{}/metadata/{folder}", self.mount),
+            None,
+            denied_ok,
+        )?;
+        if status == 404 || status == 403 {
             return Ok(None);
         }
         let custom = v
@@ -317,15 +404,16 @@ impl VaultStore {
         Ok(())
     }
 
-    /// Every secret path under `prefix` (recursive LIST).
+    /// Every secret path under `prefix` (recursive LIST). A subfolder that the token may
+    /// not list is left out; the top of the mount must be listable.
     fn walk(&self, prefix: &str, out: &mut Vec<String>) -> Result<()> {
         let path = if prefix.is_empty() {
             format!("{}/metadata/?list=true", self.mount)
         } else {
             format!("{}/metadata/{prefix}/?list=true", self.mount)
         };
-        let (status, v) = self.call("GET", &path, None)?;
-        if status == 404 {
+        let (status, v) = self.call_with("GET", &path, None, !prefix.is_empty())?;
+        if status == 404 || status == 403 {
             return Ok(());
         }
         let keys: Vec<String> = v
@@ -367,7 +455,8 @@ impl Store for VaultStore {
         self.walk("", &mut folders)?;
         let mut out = Vec::new();
         for folder in folders {
-            let Some((custom, updated)) = self.read_meta(&folder)? else {
+            // A policy that grants some folders of the mount: list the ones it may read.
+            let Some((custom, updated)) = self.read_meta_with(&folder, true)? else {
                 continue;
             };
             for (key, desc) in custom {

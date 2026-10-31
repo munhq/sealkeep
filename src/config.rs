@@ -87,13 +87,20 @@ fn yes() -> bool {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum VaultAuth {
     /// A token in `$VAULT_TOKEN`, else in the keyring entry `vault-token:<store>`.
     Token,
     /// A Kubernetes ServiceAccount JWT from `jwt_command`, exchanged at
     /// `auth/<k8s_auth_mount>/login` for a short-lived Vault token.
     Kubernetes,
+    /// An AppRole: the role ID and secret ID are read from `role_id_file` and
+    /// `secret_id_file` and exchanged at `auth/<approle_mount>/login` for a token that
+    /// lives for the run. For a machine with no keyring to unlock, such as a timer.
+    Approle,
+    /// A token that another program keeps fresh in `token_file`, such as a vault-agent
+    /// sink. sealkeep reads it on each run and never writes it.
+    TokenFile,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -117,6 +124,18 @@ pub enum StoreConfig {
         role: Option<String>,
         #[serde(default = "default_k8s_mount")]
         k8s_auth_mount: String,
+        /// The mount of the AppRole auth method.
+        #[serde(default = "default_approle_mount")]
+        approle_mount: String,
+        /// The file with the AppRole role ID. `~/` is the home folder.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role_id_file: Option<String>,
+        /// The file with the AppRole secret ID. `~/` is the home folder.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secret_id_file: Option<String>,
+        /// The file with a Vault token, for `token-file` auth. `~/` is the home folder.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token_file: Option<String>,
         /// A command that prints a ServiceAccount JWT, for Kubernetes auth.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         jwt_command: Vec<String>,
@@ -160,6 +179,20 @@ fn default_service() -> String {
 
 fn default_k8s_mount() -> String {
     "kubernetes".to_string()
+}
+
+fn default_approle_mount() -> String {
+    "approle".to_string()
+}
+
+/// A config path with `~/` replaced by the home folder.
+pub fn expand_home(p: &str) -> PathBuf {
+    match p.strip_prefix("~/") {
+        Some(rest) => directories::BaseDirs::new()
+            .map(|d| d.home_dir().join(rest))
+            .unwrap_or_else(|| PathBuf::from(p)),
+        None => PathBuf::from(p),
+    }
 }
 
 impl StoreConfig {
@@ -252,6 +285,10 @@ impl Config {
                 role,
                 jwt_command,
                 port_forward,
+                approle_mount,
+                role_id_file,
+                secret_id_file,
+                token_file,
                 ..
             } = s
             {
@@ -271,6 +308,19 @@ impl Config {
                 }
                 if *auth == VaultAuth::Kubernetes && (role.is_none() || jwt_command.is_empty()) {
                     bail!("store `{n}`: Kubernetes auth needs `role` and `jwt_command`");
+                }
+                if *auth == VaultAuth::Approle
+                    && (role_id_file.is_none() || secret_id_file.is_none())
+                {
+                    bail!("store `{n}`: AppRole auth needs `role_id_file` and `secret_id_file`");
+                }
+                if *auth == VaultAuth::Approle
+                    && (approle_mount.is_empty() || approle_mount.starts_with('/'))
+                {
+                    bail!("store `{n}`: approle_mount is a path such as `approle`");
+                }
+                if *auth == VaultAuth::TokenFile && token_file.is_none() {
+                    bail!("store `{n}`: token-file auth needs `token_file`");
                 }
             }
         }
@@ -331,6 +381,44 @@ mod tests {
     }
 
     #[test]
+    fn parse_approle_and_token_file_vault_only() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [[store]]
+            name = "vault"
+            kind = "vault"
+            address = "https://vault.example"
+            mount = "env"
+            auth = "approle"
+            role_id_file = "~/.config/vault/role-id"
+            secret_id_file = "~/.config/vault/secret-id"
+
+            [[store]]
+            name = "agent"
+            kind = "vault"
+            address = "https://vault.example"
+            mount = "env"
+            auth = "token-file"
+            token_file = "/run/vault-agent/token"
+            "#,
+        )
+        .unwrap();
+        cfg.validate().unwrap();
+        let StoreConfig::Vault {
+            auth,
+            approle_mount,
+            ..
+        } = &cfg.stores[0]
+        else {
+            panic!("a vault store");
+        };
+        assert_eq!(*auth, VaultAuth::Approle);
+        assert_eq!(approle_mount, "approle");
+        let text = toml::to_string(&cfg).unwrap();
+        assert!(text.contains(r#"auth = "token-file""#), "{text}");
+    }
+
+    #[test]
     fn rejects_bad_vault_and_alias_chains() {
         let mut cfg = Config::default();
         cfg.stores.push(StoreConfig::Vault {
@@ -340,10 +428,33 @@ mod tests {
             auth: VaultAuth::Token,
             role: None,
             k8s_auth_mount: "kubernetes".into(),
+            approle_mount: "approle".into(),
+            role_id_file: None,
+            secret_id_file: None,
+            token_file: None,
             jwt_command: vec![],
             port_forward: vec![],
         });
         assert!(cfg.validate().is_err());
+
+        for (auth, extra) in [
+            ("approle", r#"role_id_file = "~/role-id""#),
+            ("token-file", ""),
+        ] {
+            let cfg: Config = toml::from_str(&format!(
+                r#"
+                [[store]]
+                name = "vault"
+                kind = "vault"
+                address = "https://vault.example"
+                mount = "env"
+                auth = "{auth}"
+                {extra}
+                "#
+            ))
+            .unwrap();
+            assert!(cfg.validate().is_err(), "{auth}");
+        }
 
         let mut cfg = Config::default();
         cfg.aliases.insert("a/B".into(), "c/D".into());
