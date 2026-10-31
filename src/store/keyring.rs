@@ -164,6 +164,17 @@ pub fn default_locked() -> Result<Option<bool>> {
     Ok(None)
 }
 
+fn ensure_unlocked() -> Result<()> {
+    ensure_unlocked_state(default_locked()?)
+}
+
+fn ensure_unlocked_state(locked: Option<bool>) -> Result<()> {
+    if locked == Some(true) {
+        anyhow::bail!("the keyring is locked (run `sealkeep unlock`)");
+    }
+    Ok(())
+}
+
 /// Unlock the `login` collection of GNOME Keyring with its password, or create it with
 /// this password when it does not exist, and make it the default collection. This is for
 /// a session that has no desktop to show the unlock prompt.
@@ -309,6 +320,9 @@ impl KeyringStore {
     }
 
     fn index(&self) -> Result<Index> {
+        // `list` reads the index, so a locked keyring must fail here as well:
+        // the unlock prompt on the desktop is not answerable by a headless caller.
+        ensure_unlocked()?;
         match read(&self.service, INDEX_USER)? {
             Some(text) => {
                 serde_json::from_str(&text).context("the keyring index is not valid JSON")
@@ -347,6 +361,11 @@ impl Store for KeyringStore {
     }
 
     fn get(&self, name: &str) -> Result<Option<String>> {
+        // Secret Service prompts for an unlock on the desktop when its default
+        // collection is locked. In headless callers that prompt cannot be
+        // answered, so fail here and let multi-store lookup continue to its
+        // next backend (for example Vault).
+        ensure_unlocked()?;
         read(&self.service, name)
     }
 
@@ -377,5 +396,23 @@ impl Store for KeyringStore {
         }
         let n = self.index()?.secrets.len();
         Ok(format!("keyring service `{}`, {n} secrets", self.service))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_unlocked_state;
+
+    #[test]
+    fn locked_keyring_fails_with_unlock_guidance() {
+        let err = ensure_unlocked_state(Some(true)).unwrap_err();
+        assert!(err.to_string().contains("keyring is locked"));
+        assert!(err.to_string().contains("sealkeep unlock"));
+    }
+
+    #[test]
+    fn unlocked_or_unsupported_keyring_continues() {
+        assert!(ensure_unlocked_state(Some(false)).is_ok());
+        assert!(ensure_unlocked_state(None).is_ok());
     }
 }
