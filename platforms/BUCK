@@ -1,0 +1,7 @@
+load(":defs.bzl", "platforms")
+
+platforms(
+    name = "platforms",
+    cpu_configuration = "prelude//cpu:x86_64",
+    os_configuration = "prelude//os:linux",
+)
