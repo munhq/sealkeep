@@ -49,6 +49,103 @@ impl Env {
     fn audit(&self) -> String {
         std::fs::read_to_string(self.path("audit.jsonl")).unwrap_or_default()
     }
+
+    /// The socket folder of the agent: `$XDG_RUNTIME_DIR/sealkeep`.
+    fn agent_dir(&self) -> PathBuf {
+        self.path("sealkeep")
+    }
+
+    fn agent_socket(&self) -> PathBuf {
+        self.agent_dir().join("agent.sock")
+    }
+
+    /// Start `sealkeep agent` for the environment of this test.
+    fn start_agent(&self) -> std::process::Child {
+        std::process::Command::new(assert_cmd::cargo::cargo_bin("sealkeep"))
+            .arg("agent")
+            .env("SEALKEEP_TEST_KEYRING_FILE", self.path("keyring.ron"))
+            .env("SEALKEEP_CONFIG", self.path("config.toml"))
+            .env("SEALKEEP_AUDIT_LOG", self.path("audit.jsonl"))
+            .env("XDG_RUNTIME_DIR", self.dir.path())
+            // The agent reads the fake Vault of a test with this token; the other tests
+            // have no vault store and ignore it.
+            .env("VAULT_TOKEN", "test-token")
+            .current_dir(self.dir.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    /// Wait until the agent listens. A test fails rather than hangs when it does not.
+    fn wait_for_agent(&self) -> PathBuf {
+        let path = self.agent_socket();
+        for _ in 0..500 {
+            if std::os::unix::net::UnixStream::connect(&path).is_ok() {
+                return path;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("the agent did not listen on {}", path.display());
+    }
+}
+
+/// Send one line of JSON to the agent and read one line back.
+fn agent_request(socket: &Path, request: Value) -> Value {
+    use std::os::unix::net::UnixStream;
+    let mut stream = UnixStream::connect(socket).unwrap();
+    stream.write_all(format!("{request}\n").as_bytes()).unwrap();
+    stream.flush().unwrap();
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    serde_json::from_str(&line).unwrap()
+}
+
+/// Wait until the agent reports a completed load with at least `values` values.
+fn wait_for_values(socket: &Path, values: usize) -> Value {
+    for _ in 0..500 {
+        let reply = agent_request(socket, json!({"cmd": "status"}));
+        let status = &reply["status"];
+        if status["loading"] == false && status["values"].as_u64().unwrap_or(0) >= values as u64 {
+            return status.clone();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("the agent did not load {values} values");
+}
+
+/// Stop an agent that a hook started, so a test leaves no process behind. The folder of a
+/// test is private, so the agent of the test is the only one on this socket.
+impl Drop for Env {
+    fn drop(&mut self) {
+        let socket = self.agent_socket();
+        let marker = self.agent_dir().join("agent.start");
+        if !socket.exists() && !marker.exists() {
+            return;
+        }
+        // A hook starts the agent in the background; the socket can appear a moment later.
+        for _ in 0..250 {
+            if socket.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if !socket.exists() {
+            return;
+        }
+        let _ = std::os::unix::net::UnixStream::connect(&socket).map(|mut s| {
+            let _ = s.write_all(b"{\"cmd\":\"stop\"}\n");
+            let _ = s.flush();
+        });
+        for _ in 0..250 {
+            if !socket.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
 }
 
 fn stdout(o: &std::process::Output) -> String {
@@ -515,6 +612,208 @@ fn guard_after_replaces_a_stored_value_in_the_result() {
         .unwrap();
     assert_eq!(out.status.code(), Some(0));
     assert!(out.stdout.is_empty());
+}
+
+// ── The resident redaction agent ────────────────────────────────────────────
+
+fn tool_result(stdout: &str) -> Value {
+    json!({
+        "tool_name": "Bash",
+        "tool_input": {"command": "env"},
+        "tool_response": {"stdout": stdout, "stderr": "", "interrupted": false}
+    })
+}
+
+#[test]
+fn agent_redacts_from_its_memory_and_keeps_its_socket_private() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = Env::new();
+    env.set("API_KEY", SECRET);
+    let mut child = env.start_agent();
+    let socket = env.wait_for_agent();
+    let status = wait_for_values(&socket, 1);
+    assert_eq!(status["stores"][0]["name"], "local");
+    assert!(status["memlock"].is_boolean());
+
+    let dir_mode = std::fs::metadata(env.agent_dir())
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    let socket_mode = std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777;
+    assert_eq!(dir_mode, 0o700);
+    assert_eq!(socket_mode, 0o600);
+
+    let reply = agent_request(
+        &socket,
+        json!({"cmd": "redact", "input": tool_result(&format!("API_KEY={SECRET}\n"))}),
+    );
+    assert_eq!(reply["ok"], true);
+    assert!(!reply.to_string().contains(SECRET));
+    assert_eq!(
+        reply["output"]["hookSpecificOutput"]["updatedToolOutput"]["stdout"],
+        "API_KEY=[sealkeep:API_KEY]\n"
+    );
+
+    let reply = agent_request(&socket, json!({"cmd": "stop"}));
+    assert_eq!(reply["ok"], true);
+    assert!(child.wait().unwrap().success());
+}
+
+#[test]
+fn agent_reads_a_new_secret_after_a_reload() {
+    let env = Env::new();
+    env.set("API_KEY", SECRET);
+    let mut child = env.start_agent();
+    let socket = env.wait_for_agent();
+    wait_for_values(&socket, 1);
+
+    let other = "sk-second-0123456789";
+    env.set("OTHER_KEY", other);
+    // `set` sends a reload request to the agent. The next answer holds the new value.
+    let status = wait_for_values(&socket, 2);
+    assert_eq!(status["values"], 2);
+
+    let reply = agent_request(
+        &socket,
+        json!({"cmd": "redact", "input": tool_result(&format!("OTHER_KEY={other}\n"))}),
+    );
+    assert_eq!(reply["ok"], true);
+    assert_eq!(
+        reply["output"]["hookSpecificOutput"]["updatedToolOutput"]["stdout"],
+        "OTHER_KEY=[sealkeep:OTHER_KEY]\n"
+    );
+    assert!(!reply.to_string().contains(other));
+
+    // An explicit reload request gives the status after the load.
+    let reply = agent_request(&socket, json!({"cmd": "reload"}));
+    assert_eq!(reply["ok"], true);
+    assert_eq!(reply["status"]["values"], 2);
+
+    let _ = agent_request(&socket, json!({"cmd": "stop"}));
+    let _ = child.wait();
+}
+
+#[test]
+fn guard_after_redacts_without_an_agent_and_starts_it_for_the_next_call() {
+    let env = Env::new();
+    env.set("API_KEY", SECRET);
+    let input = tool_result(&format!("API_KEY={SECRET}\n")).to_string();
+
+    let out = env
+        .cmd()
+        .args(["guard", "--client", "claude", "--after"])
+        .write_stdin(input.clone())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(!stdout(&out).contains(SECRET));
+    assert!(stdout(&out).contains("[sealkeep:API_KEY]"));
+
+    // The hook started the agent in the background for the next tool result.
+    let socket = env.wait_for_agent();
+    wait_for_values(&socket, 1);
+
+    let out = env
+        .cmd()
+        .args(["guard", "--client", "claude", "--after"])
+        .write_stdin(input)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(!stdout(&out).contains(SECRET));
+    assert!(stdout(&out).contains("[sealkeep:API_KEY]"));
+
+    let out = env.cmd().arg("doctor").output().unwrap();
+    let o = stdout(&out);
+    assert!(o.contains("agent: running"), "{o}");
+    assert!(o.contains("agent store local"), "{o}");
+}
+
+#[test]
+fn agent_redacts_a_value_of_each_store() {
+    let env = Env::new();
+    let local = "local-test-value-123";
+    let vault = "vault-test-value-456";
+    env.set("LOCAL_KEY", local);
+
+    let state = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+    let url = serve_fake_vault(state);
+    env.cmd()
+        .args([
+            "store",
+            "add-vault",
+            "vault",
+            "--address",
+            &url,
+            "--auth",
+            "token",
+        ])
+        .assert()
+        .success();
+    // The value goes to the vault store only, so each store holds its own value.
+    env.cmd()
+        .args([
+            "set",
+            "personal/app/VAULT_KEY",
+            "--stdin",
+            "--store",
+            "vault",
+        ])
+        .env("VAULT_TOKEN", "test-token")
+        .write_stdin(format!("{vault}\n"))
+        .assert()
+        .success();
+
+    let mut child = env.start_agent();
+    let socket = env.wait_for_agent();
+    let status = wait_for_values(&socket, 2);
+    let names: Vec<&str> = status["stores"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"local"), "{status}");
+    assert!(names.contains(&"vault"), "{status}");
+    for s in status["stores"].as_array().unwrap() {
+        assert_eq!(s["secrets"], 1, "{status}");
+    }
+
+    let reply = agent_request(
+        &socket,
+        json!({"cmd": "redact", "input": tool_result(&format!(
+            "LOCAL_KEY={local}\nVAULT_KEY={vault}\n"
+        ))}),
+    );
+    assert_eq!(reply["ok"], true);
+    assert!(!reply.to_string().contains(local));
+    assert!(!reply.to_string().contains(vault));
+    assert_eq!(
+        reply["output"]["hookSpecificOutput"]["updatedToolOutput"]["stdout"],
+        "LOCAL_KEY=[sealkeep:LOCAL_KEY]\nVAULT_KEY=[sealkeep:personal/app/VAULT_KEY]\n"
+    );
+
+    let _ = agent_request(&socket, json!({"cmd": "stop"}));
+    let _ = child.wait();
+}
+
+#[test]
+fn agent_answers_a_clean_result_with_no_output() {
+    let env = Env::new();
+    env.set("API_KEY", SECRET);
+    let mut child = env.start_agent();
+    let socket = env.wait_for_agent();
+    wait_for_values(&socket, 1);
+    let reply = agent_request(
+        &socket,
+        json!({"cmd": "redact", "input": tool_result("hello\n")}),
+    );
+    assert_eq!(reply["ok"], true);
+    assert!(reply.get("output").is_none() || reply["output"].is_null());
+    let _ = agent_request(&socket, json!({"cmd": "stop"}));
+    let _ = child.wait();
 }
 
 #[test]
