@@ -175,8 +175,7 @@ pub fn notify_reload() {
     #[cfg(unix)]
     {
         use std::io::Write;
-        use std::os::unix::net::UnixStream;
-        let Ok(mut stream) = UnixStream::connect(socket_path()) else {
+        let Ok(mut stream) = connect() else {
             return;
         };
         let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
@@ -592,9 +591,35 @@ fn prepare_dir(_dir: &std::path::Path) -> bool {
     false
 }
 
+/// The socket folder is safe to connect into only when this user owns it and no other
+/// user can write to it. Without this check, another local user could make the folder
+/// first (it is in the shared temporary folder when `XDG_RUNTIME_DIR` is not set), listen
+/// there, and receive the tool results that the hook sends for redaction.
+#[cfg(unix)]
+fn dir_is_private(dir: &std::path::Path) -> bool {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let Ok(md) = std::fs::symlink_metadata(dir) else {
+        return false;
+    };
+    md.file_type().is_dir()
+        && md.uid() == unsafe { libc::geteuid() }
+        && md.permissions().mode() & 0o077 == 0
+}
+
+/// Connect to the agent socket, but only inside a private folder.
+#[cfg(unix)]
+fn connect() -> std::io::Result<std::os::unix::net::UnixStream> {
+    if !dir_is_private(&dir()) {
+        return Err(std::io::Error::other(
+            "the socket folder is not private to this user",
+        ));
+    }
+    std::os::unix::net::UnixStream::connect(socket_path())
+}
+
 #[cfg(unix)]
 fn can_connect() -> bool {
-    std::os::unix::net::UnixStream::connect(socket_path()).is_ok()
+    connect().is_ok()
 }
 
 #[cfg(not(unix))]
@@ -649,9 +674,8 @@ fn ask(
     timeout: Duration,
 ) -> std::result::Result<serde_json::Value, AskError> {
     use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::net::UnixStream;
 
-    let stream = UnixStream::connect(socket_path()).map_err(|_| AskError::NotRunning)?;
+    let stream = connect().map_err(|_| AskError::NotRunning)?;
     let _ = stream.set_read_timeout(Some(timeout));
     let _ = stream.set_write_timeout(Some(timeout));
     let mut writer = match stream.try_clone() {
@@ -754,6 +778,23 @@ fn same_user(peer: u32, me: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_that_others_can_write_is_not_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("sealkeep-dir-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(dir_is_private(&base));
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(!dir_is_private(&base));
+        assert!(!dir_is_private(&base.join("missing")));
+        let file = base.join("file");
+        std::fs::write(&file, b"").unwrap();
+        assert!(!dir_is_private(&file));
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn a_peer_with_another_uid_is_refused() {
