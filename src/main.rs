@@ -14,6 +14,34 @@ mod scan;
 mod ssh;
 mod store;
 
+#[cfg(unix)]
+mod agent;
+
+#[cfg(not(unix))]
+mod agent {
+    use anyhow::Result;
+
+    pub enum Answer {
+        Redacted(Option<serde_json::Value>),
+        NotRunning,
+        Timeout,
+    }
+
+    pub fn redact(_input: &serde_json::Value) -> Answer {
+        Answer::NotRunning
+    }
+    pub fn start_background() {}
+    pub fn notify_reload() {}
+    pub fn doctor() -> Vec<String> {
+        vec!["agent: not available on this platform".to_string()]
+    }
+    pub fn run() -> Result<i32> {
+        anyhow::bail!(
+            "the redaction agent needs a Unix socket; it is not available on this platform"
+        )
+    }
+}
+
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use config::{Config, StoreConfig, VaultAuth};
@@ -198,6 +226,8 @@ enum Cmd {
         #[arg(long)]
         agent: Option<String>,
     },
+    /// Run the resident redaction agent for the post-tool hook. The hook starts it.
+    Agent,
     /// Check the config, the stores and the clients.
     Doctor,
     /// Show the last entries of the local audit log.
@@ -411,6 +441,7 @@ fn dispatch(cmd: Cmd) -> Result<i32> {
             eprintln!("Added {path} to the keys of ssh-load.");
             Ok(0)
         }
+        Cmd::Agent => agent::run(),
         Cmd::Doctor => doctor(),
         Cmd::Audit { tail } => audit_tail(tail),
     }
@@ -543,6 +574,7 @@ fn set(
             done.iter().map(|s| format!("{s}:{name}")).collect(),
             None,
         )?;
+        agent::notify_reload();
         eprintln!("Stored {name} in {}.", done.join(", "));
     }
     Ok(if failed { 1 } else { 0 })
@@ -599,6 +631,7 @@ fn mv(old: &str, new: &str, store: Option<&str>) -> Result<i32> {
             .collect(),
         None,
     )?;
+    agent::notify_reload();
     eprintln!(
         "Moved {old} to {new} in {} ({follow} aliases follow it).",
         moved_in.join(", ")
@@ -623,6 +656,7 @@ fn rm(name: &str, store: Option<&str>) -> Result<i32> {
         bail!("no store has a secret `{name}`");
     }
     record("remove", removed.clone(), None)?;
+    agent::notify_reload();
     eprintln!("Removed {}.", removed.join(", "));
     Ok(0)
 }
@@ -788,6 +822,7 @@ fn sync(from: &str, to: &str, folder: Option<&str>, dry_run: bool) -> Result<i32
             copied.iter().map(|n| format!("{to}:{n}")).collect(),
             Some(format!("from {from}")),
         )?;
+        agent::notify_reload();
     }
     let verb = if dry_run { "Would copy" } else { "Copied" };
     eprintln!(
@@ -988,6 +1023,19 @@ fn guard_after_cmd() -> i32 {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&input) else {
         return 0;
     };
+    // The resident agent answers in milliseconds. When it is up, the stores do not load
+    // on this path.
+    match agent::redact(&v) {
+        agent::Answer::Redacted(out) => {
+            if let Some(out) = out {
+                println!("{out}");
+            }
+            return 0;
+        }
+        // Start it for the next call, and use the in-process path for this one.
+        agent::Answer::NotRunning => agent::start_background(),
+        agent::Answer::Timeout => {}
+    }
     let Ok(cfg) = Config::load() else { return 0 };
     let values = guard::load_values(&cfg);
     let redactor = redact::Redactor::new(values.iter().map(|(n, v)| (n.as_str(), v.as_str())));
@@ -1102,6 +1150,9 @@ fn doctor() -> Result<i32> {
     println!("binary: {}", install::bin_path()?);
     println!("config: {}", config::path()?.display());
     println!("audit log: {}", audit::path()?.display());
+    for line in agent::doctor() {
+        println!("{line}");
+    }
     let cfg = match Config::load() {
         Ok(c) => c,
         Err(e) => {

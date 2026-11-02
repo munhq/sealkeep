@@ -66,7 +66,14 @@ fn bounded<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) ->
 static INIT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
 
 #[cfg(feature = "test-store")]
-static SAMPLE: OnceLock<std::sync::Arc<keyring_core::sample::Store>> = OnceLock::new();
+static SAMPLE: std::sync::Mutex<Option<std::sync::Arc<keyring_core::sample::Store>>> =
+    std::sync::Mutex::new(None);
+
+/// The stores that `refresh` replaced. They stay alive because the sample store saves its
+/// memory to the backing file when it drops; an old store must not write over the file.
+#[cfg(feature = "test-store")]
+static RETIRED: std::sync::Mutex<Vec<std::sync::Arc<keyring_core::sample::Store>>> =
+    std::sync::Mutex::new(Vec::new());
 
 /// Set the platform store as the default keyring store, one time per process.
 pub fn init() -> Result<()> {
@@ -80,7 +87,9 @@ fn platform_store() -> Result<()> {
     if let Some(path) = std::env::var_os("SEALKEEP_TEST_KEYRING_FILE") {
         let path = path.to_string_lossy().into_owned();
         let store = keyring_core::sample::Store::new_with_backing(&path)?;
-        let _ = SAMPLE.set(store.clone());
+        if let Ok(mut sample) = SAMPLE.lock() {
+            *sample = Some(store.clone());
+        }
         keyring_core::set_default_store(store);
         return Ok(());
     }
@@ -97,8 +106,30 @@ fn platform_store() -> Result<()> {
 /// The sample store of the tests writes its file only on request.
 fn persist() -> Result<()> {
     #[cfg(feature = "test-store")]
-    if let Some(s) = SAMPLE.get() {
+    if let Some(s) = SAMPLE.lock().ok().and_then(|s| s.clone()) {
         s.save()?;
+    }
+    Ok(())
+}
+
+/// Test only: read the backing file of the sample store again. The real keyring stores are
+/// processes of their own, so the agent sees their new entries on each call. The sample
+/// store holds its entries in memory, and this makes the reload of a test do the same.
+#[cfg(feature = "test-store")]
+pub fn refresh() -> Result<()> {
+    let Some(path) = std::env::var_os("SEALKEEP_TEST_KEYRING_FILE") else {
+        return Ok(());
+    };
+    let store = keyring_core::sample::Store::new_with_backing(&path.to_string_lossy())?;
+    let old = SAMPLE
+        .lock()
+        .ok()
+        .and_then(|mut s| s.replace(store.clone()));
+    keyring_core::set_default_store(store);
+    if let Some(old) = old
+        && let Ok(mut retired) = RETIRED.lock()
+    {
+        retired.push(old);
     }
     Ok(())
 }
