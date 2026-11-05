@@ -1,11 +1,63 @@
 {
   "version": 1,
+  "base": "origin/main",
   "github": "munhq/sealkeep",
   "store": "server",
   "server": {
     "url": "https://desk.munhq.com",
     "tokenEnv": "DESK_TOKEN"
   },
+  "size": {
+    "warn": 1500,
+    "fail": 5000,
+    "tests": [
+      "**/test/**",
+      "**/tests/**",
+      "**/__tests__/**",
+      "**/*.test.*",
+      "**/*.spec.*",
+      "**/*_test.go",
+      "**/*.t.sol"
+    ],
+    "overrideLabel": "size/override"
+  },
+  "generated": [
+    "*.lock",
+    "bun.lockb",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "go.sum",
+    "*.gen.*",
+    "**/generated/**",
+    "*.pb.go",
+    "*_pb.ts",
+    "*.snap"
+  ],
+  "scope": {
+    "separate": [
+      "docs/specs/**",
+      "docs/plans/**"
+    ],
+    "nonCode": [
+      "**/*.md",
+      "docs/**",
+      ".github/**",
+      ".desk/**",
+      ".review-kit/**"
+    ],
+    "maxPackages": 2
+  },
+  "checks": [
+    {
+      "id": "CHK-C1",
+      "rule": "A TODO or FIXME links an issue",
+      "pattern": "\\b(TODO|FIXME)\\b(?!.*(#\\d+|issues/\\d+))",
+      "include": [
+        "**"
+      ],
+      "blocking": false
+    }
+  ],
   "validation": [
     {
       "name": "fmt",
@@ -14,7 +66,8 @@
         "src/**",
         "tests/**"
       ],
-      "timeoutMinutes": 10
+      "timeoutMinutes": 10,
+      "stage": "land"
     },
     {
       "name": "clippy",
@@ -25,7 +78,8 @@
         "Cargo.toml",
         "Cargo.lock"
       ],
-      "timeoutMinutes": 20
+      "timeoutMinutes": 20,
+      "stage": "main"
     },
     {
       "name": "test",
@@ -36,7 +90,102 @@
         "Cargo.toml",
         "Cargo.lock"
       ],
-      "timeoutMinutes": 20
+      "timeoutMinutes": 20,
+      "stage": "main"
+    },
+    {
+      "name": "npm",
+      "command": "npm run test",
+      "cwd": "npm",
+      "paths": [
+        "npm/**"
+      ],
+      "setup": "npm install",
+      "stage": "main"
     }
-  ]
+  ],
+  "checkouts": [],
+  "images": [],
+  "deploys": [],
+  "review": {
+    "instructions": "REVIEW.md",
+    "policyPacks": [],
+    "context": [
+      "AGENTS.md"
+    ],
+    "rules": "rules",
+    "profiles": {
+      "full": "profiles/full.md",
+      "security": "profiles/security.md",
+      "architecture": "profiles/architecture.md",
+      "smart-contract": "profiles/smart-contract.md",
+      "devops": "profiles/devops.md",
+      "reliability": "profiles/reliability.md"
+    },
+    "maxNits": 5,
+    "maxDiffChars": 120000,
+    "attentionMarkers": [],
+    "units": [],
+    "boundaries": [],
+    "models": {},
+    "requirements": {
+      "enforce": false,
+      "terms": [],
+      "recent": 30,
+      "maxChars": 40000,
+      "prTypes": [
+        "feat"
+      ],
+      "projects": [],
+      "instructions": [
+        "AGENTS.md",
+        "CLAUDE.md"
+      ]
+    }
+  },
+  "pr": {
+    "types": [
+      "feat",
+      "fix",
+      "refactor",
+      "perf",
+      "test",
+      "docs",
+      "spec",
+      "chore",
+      "ci",
+      "build"
+    ],
+    "evidence": [],
+    "requireIssueState": false
+  },
+  "workspace": {
+    "worktrees": "off"
+  },
+  "merge": {
+    "method": "merge",
+    "after": [],
+    "requireChecks": true
+  },
+  "issue": {
+    "types": [
+      "feature",
+      "bug",
+      "design",
+      "chore",
+      "epic"
+    ],
+    "sections": [
+      "Why",
+      "Goal",
+      "Proposal and plan",
+      "Done when"
+    ],
+    "requireQuestions": [],
+    "requirePriority": [],
+    "requireEpic": [],
+    "requireResearch": [],
+    "gatePrs": false,
+    "stallDays": 3
+  }
 }
