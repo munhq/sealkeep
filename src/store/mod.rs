@@ -208,20 +208,20 @@ impl Stores {
     /// One binding for each secret in `folder` (and in its subfolders when `recursive`),
     /// by the key of its name. Two secrets with the same key are an error, because one
     /// variable cannot hold both.
+    ///
+    /// A store that fails does not stop the others: its error comes back as a warning, so a
+    /// run uses the stores that answer. A store named with `store` must answer.
     pub fn folder_bindings(
         &self,
         folder: &str,
         store: Option<&str>,
         recursive: bool,
-    ) -> Result<Vec<Binding>> {
+    ) -> Result<(Vec<Binding>, Vec<String>)> {
         names::check_prefix(folder)?;
         let (items, errors) = match store {
             Some(s) => (self.by_name(s)?.list()?, Vec::new()),
             None => self.list_all(),
         };
-        if !errors.is_empty() {
-            bail!("cannot list every store: {}", errors.join("; "));
-        }
         let mut by_key: HashMap<String, String> = HashMap::new();
         let mut out = Vec::new();
         let wanted = |name: &str| {
@@ -251,8 +251,136 @@ impl Stores {
             });
         }
         if out.is_empty() {
-            bail!("the folder `{folder}` has no secret (run `sealkeep list {folder}`)");
+            if errors.is_empty() {
+                bail!("the folder `{folder}` has no secret (run `sealkeep list {folder}`)");
+            }
+            bail!(
+                "the folder `{folder}` has no secret in the stores that answered: {}",
+                errors.join("; ")
+            );
         }
-        Ok(out)
+        Ok((out, errors))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A store with fixed names, or a store that fails the way a locked keyring fails.
+    struct Fake {
+        name: &'static str,
+        locked: bool,
+        names: Vec<&'static str>,
+    }
+
+    impl Store for Fake {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn kind(&self) -> &'static str {
+            "fake"
+        }
+        fn list(&self) -> Result<Vec<SecretInfo>> {
+            if self.locked {
+                bail!("the keyring is locked (run `sealkeep unlock`)");
+            }
+            Ok(self
+                .names
+                .iter()
+                .map(|n| SecretInfo {
+                    store: self.name.to_string(),
+                    name: (*n).to_string(),
+                    description: None,
+                    updated_at: None,
+                    alias_of: None,
+                })
+                .collect())
+        }
+        fn get(&self, _name: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+        fn set(&self, _name: &str, _value: &str, _description: Option<&str>) -> Result<()> {
+            Ok(())
+        }
+        fn remove(&self, _name: &str) -> Result<bool> {
+            Ok(false)
+        }
+        fn status(&self) -> Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    fn stores(list: Vec<Fake>) -> Stores {
+        Stores {
+            stores: list
+                .into_iter()
+                .map(|s| Box::new(s) as Box<dyn Store>)
+                .collect(),
+            aliases: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn a_locked_store_does_not_stop_the_other_stores() {
+        let s = stores(vec![
+            Fake {
+                name: "local",
+                locked: true,
+                names: Vec::new(),
+            },
+            Fake {
+                name: "vault",
+                locked: false,
+                names: vec![
+                    "personal/trading/prod/API_KEY",
+                    "personal/trading/prod/TOKEN",
+                ],
+            },
+        ]);
+        let (bindings, warnings) = s
+            .folder_bindings("personal/trading/prod", None, false)
+            .unwrap();
+        assert_eq!(
+            bindings.iter().map(|b| b.var.as_str()).collect::<Vec<_>>(),
+            vec!["API_KEY", "TOKEN"]
+        );
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].starts_with("local: the keyring is locked"));
+    }
+
+    #[test]
+    fn a_store_named_with_store_must_answer() {
+        let s = stores(vec![Fake {
+            name: "local",
+            locked: true,
+            names: Vec::new(),
+        }]);
+        let err = s
+            .folder_bindings("personal/trading/prod", Some("local"), false)
+            .unwrap_err();
+        assert!(err.to_string().contains("the keyring is locked"));
+    }
+
+    #[test]
+    fn an_empty_folder_names_the_store_that_failed() {
+        let s = stores(vec![
+            Fake {
+                name: "local",
+                locked: true,
+                names: Vec::new(),
+            },
+            Fake {
+                name: "vault",
+                locked: false,
+                names: vec!["personal/other/KEY"],
+            },
+        ]);
+        let err = s
+            .folder_bindings("personal/trading/prod", None, false)
+            .unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("has no secret in the stores that answered"));
+        assert!(text.contains("local: the keyring is locked"));
     }
 }

@@ -175,6 +175,12 @@ pub fn delete(service: &str, user: &str) -> Result<bool> {
 
 /// Whether the default collection of the Secret Service is locked. `None` on macOS and
 /// Windows, where the login keychain is unlocked with the session.
+///
+/// The check reads two properties, so it opens no Secret Service session, and it closes
+/// its D-Bus connection on every path. A check that opened a session and left its
+/// connection open kept a session in gnome-keyring-daemon for each start. About 250 starts
+/// of a service that restarts every 30 s filled the 1024 file handles of the daemon, and
+/// then the daemon could not read `login.keyring` at all (2026-11-05).
 pub fn default_locked() -> Result<Option<bool>> {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -182,19 +188,62 @@ pub fn default_locked() -> Result<Option<bool>> {
         if std::env::var_os("SEALKEEP_TEST_KEYRING_FILE").is_some() {
             return Ok(Some(false));
         }
-        use secret_service::EncryptionType;
-        use secret_service::blocking::SecretService;
-        let ss = SecretService::connect(EncryptionType::Plain)
-            .context("connect to the Secret Service on the session bus")?;
-        // No default collection (a new account, or a login keyring that was moved
-        // away) needs the same step as a locked one: `unlock` creates it.
-        match ss.get_default_collection() {
-            Ok(c) => Ok(Some(c.is_locked()?)),
-            Err(_) => Ok(Some(true)),
-        }
+        use zbus::blocking::Connection;
+        use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+
+        const DEST: &str = "org.freedesktop.secrets";
+        const ROOT: &str = "/org/freedesktop/secrets";
+        const SERVICE: &str = "org.freedesktop.Secret.Service";
+        const COLLECTION: &str = "org.freedesktop.Secret.Collection";
+
+        let conn =
+            Connection::session().context("connect to the Secret Service on the session bus")?;
+        let locked = (|| -> Result<bool> {
+            let alias: OwnedObjectPath = conn
+                .call_method(Some(DEST), ROOT, Some(SERVICE), "ReadAlias", &("default",))
+                .context("read the default collection of the Secret Service")?
+                .body()
+                .deserialize()?;
+            // No default collection (a new account, or a login keyring that was moved
+            // away) needs the same step as a locked one: `unlock` creates it.
+            if alias.as_str() == "/" {
+                return Ok(true);
+            }
+            // A property answer is a variant, so it needs one more step than a plain bool.
+            let locked: OwnedValue = conn
+                .call_method(
+                    Some(DEST),
+                    alias.as_str(),
+                    Some("org.freedesktop.DBus.Properties"),
+                    "Get",
+                    &(COLLECTION, "Locked"),
+                )
+                .context("read the lock state of the default collection")?
+                .body()
+                .deserialize()?;
+            locked
+                .try_into()
+                .context("read the lock state of the default collection")
+        })();
+        close_connection(&conn);
+        Ok(Some(locked?))
     }
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     Ok(None)
+}
+
+/// Close a D-Bus connection to the session bus. A drop closes it as well, but this closes
+/// it before the caller returns, also on an error path, and it does not depend on how long
+/// the process lives.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn close_connection(conn: &zbus::blocking::Connection) {
+    let _ = conn.call_method(
+        Some("org.freedesktop.DBus"),
+        "/org/freedesktop/DBus",
+        Some("org.freedesktop.DBus"),
+        "Close",
+        &(),
+    );
 }
 
 fn ensure_unlocked_state(locked: Option<bool>) -> Result<()> {
@@ -321,6 +370,7 @@ pub fn unlock_gnome_keyring(password: &str) -> Result<()> {
         "Close",
         &(),
     );
+    close_connection(&conn);
     Ok(())
 }
 
@@ -342,9 +392,9 @@ pub struct KeyringStore {
     name: String,
     service: String,
     /// The lock state of the default collection and when it was read. Each check opens a
-    /// D-Bus connection and a Secret Service session. The post-tool guard reads every
-    /// secret on each tool call, so a check for each secret opened about 560 sessions per
-    /// call, and gnome-keyring-daemon 48.0 aborted when a client left during the session
+    /// D-Bus connection, and the check closes it again. The post-tool guard reads every
+    /// secret on each tool call, so a check for each secret opened about 560 connections
+    /// per call, and gnome-keyring-daemon 48.0 aborted when a client left during a session
     /// negotiation (`plain_negotiate: assertion 'session' failed`, a core dump on
     /// 2026-10-30 and on 2026-10-31). A new daemon starts locked.
     lock_state: Mutex<Option<(Instant, Option<bool>)>>,

@@ -214,6 +214,11 @@ sealkeep unlock
 
 It asks for the password of the login keyring and gives it to `gnome-keyring-daemon --unlock`. Each keyring call waits at most 30 seconds (`SEALKEEP_KEYRING_TIMEOUT`), so an agent gets an error, and the call does not hang.
 
+A locked keyring does not stop a command. When one store does not answer, `run` and `list`
+use the values of the other stores, and they print one warning for that store. A name that
+only the locked store has fails on its own name, with the error of that store. A store that
+you name with `-s` must answer.
+
 ### Vault as a replica
 
 A Vault (or OpenBao) KV v2 mount can hold a copy of the keyring, for a second machine or a backup. Each folder is one KV secret, and each key is one field of it: `shared/stripe/test/SECRET_KEY` is the field `SECRET_KEY` of `agent/shared/stripe/test`. The `custom_metadata` of each secret lists its keys and their descriptions, so `list` reads no value.

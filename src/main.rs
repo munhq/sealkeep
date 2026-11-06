@@ -484,10 +484,15 @@ fn list(folder: Option<&str>, store: Option<String>, as_json: bool) -> Result<i3
             println!("{:w$}  {:sw$}  {d}", i.name, i.store);
         }
         for e in &errors {
-            eprintln!("sealkeep: store {e}");
+            eprintln!("sealkeep: warning: store {e}");
         }
     }
-    Ok(if errors.is_empty() { 0 } else { 1 })
+    // A store that is locked must not stop the list when other stores answer.
+    Ok(if errors.is_empty() || !items.is_empty() {
+        0
+    } else {
+        1
+    })
 }
 
 /// Remove one trailing line break.
@@ -691,11 +696,25 @@ fn run_cmd(
     let stores = stores()?;
     // Folders first, then single names, so a single name can replace one folder entry.
     let mut bindings: Vec<Binding> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
     for f in &all {
-        for b in stores.folder_bindings(f.trim_end_matches('/'), store.as_deref(), recursive)? {
+        let (folder, folder_warnings) =
+            stores.folder_bindings(f.trim_end_matches('/'), store.as_deref(), recursive)?;
+        for w in folder_warnings {
+            if !warnings.contains(&w) {
+                warnings.push(w);
+            }
+        }
+        for b in folder {
             bindings.retain(|x| x.var != b.var);
             bindings.push(b);
         }
+    }
+    // A store that does not answer, for example a locked keyring, must not stop the run:
+    // the other stores give the values, and a value that only that store has fails on its
+    // own name, with the error of that store.
+    for w in &warnings {
+        eprintln!("sealkeep: warning: {w}");
     }
     let mut single: Vec<Binding> = secrets
         .iter()

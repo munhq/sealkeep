@@ -1594,3 +1594,61 @@ fn aws_store_against_localstack() {
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["secrets"].as_array().unwrap().len(), 1, "{v}");
 }
+
+/// One store that does not answer is a warning, not the end of the command. A locked
+/// keyring must not stop a service whose values are all in the other store.
+#[test]
+fn a_store_that_does_not_answer_is_a_warning() {
+    let env = Env::new();
+    env.set("app/prod/TOKEN", SECRET);
+    let fake = fake_vendors(&env);
+    let mut c = env.cmd();
+    fake.apply(&mut c);
+    c.args(["store", "add-bitwarden", "bw"]).assert().success();
+
+    // `list` prints the names of the stores that answered, with one warning line.
+    let mut c = env.cmd();
+    fake.apply(&mut c);
+    c.env_remove("BW_SESSION")
+        .args(["list"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("sealkeep: warning: store bw:"))
+        .stdout(predicates::str::contains("app/prod/TOKEN"));
+
+    // A folder run starts with the values of the store that answered.
+    let mut c = env.cmd();
+    fake.apply(&mut c);
+    c.env_remove("BW_SESSION")
+        .args([
+            "run",
+            "--all",
+            "app/prod",
+            "--",
+            "sh",
+            "-c",
+            "echo ${#TOKEN}",
+        ])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("warning: bw:"))
+        .stdout(predicates::str::contains("24"));
+
+    // A name that only the store that does not answer has fails on its own name.
+    let mut c = env.cmd();
+    fake.apply(&mut c);
+    c.env_remove("BW_SESSION")
+        .args(["run", "bw:app/prod/OTHER", "--", "true"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("bw is locked"));
+
+    // A store that a call names must answer.
+    let mut c = env.cmd();
+    fake.apply(&mut c);
+    c.env_remove("BW_SESSION")
+        .args(["run", "--all", "app/prod", "--store", "bw", "--", "true"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("bw unlock --raw"));
+}
