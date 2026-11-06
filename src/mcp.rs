@@ -145,8 +145,16 @@ impl Server {
                     .clamp(1, MAX_TIMEOUT_SECS),
             );
             let mut env: Vec<Binding> = Vec::new();
+            let mut warnings: Vec<String> = Vec::new();
             for f in &args.folders {
-                for b in stores.folder_bindings(f.trim_end_matches('/'), None, args.recursive)? {
+                let (folder, folder_warnings) =
+                    stores.folder_bindings(f.trim_end_matches('/'), None, args.recursive)?;
+                for w in folder_warnings {
+                    if !warnings.contains(&w) {
+                        warnings.push(w);
+                    }
+                }
+                for b in folder {
                     env.retain(|x| x.var != b.var);
                     env.push(b);
                 }
@@ -170,6 +178,7 @@ impl Server {
                 "stderr": c.stderr,
                 "truncated": c.truncated,
                 "timed_out": c.timed_out,
+                "warnings": warnings,
             }))
         })
         .await

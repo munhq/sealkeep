@@ -56,5 +56,5 @@ If your client has the sealkeep MCP server, use `list_secrets` (with `folder`), 
 
 - `no store has a secret NAME`: tell the person the name to add with `sealkeep set NAME`.
 - `both set KEY`: two secrets in the `--all` folders have the same key. Name one folder, or use `-e` for one of them.
-- `the OS keyring did not answer` or `the keyring is locked`: tell the person to run `sealkeep unlock` in a terminal.
+- `the keyring is locked`: `run` and `list` print this as a warning and use the other stores, so the command starts. Tell the person to run `sealkeep unlock` in a terminal when a name that only the keyring has is missing.
 - Run `sealkeep doctor` to see the stores and the installed clients.
