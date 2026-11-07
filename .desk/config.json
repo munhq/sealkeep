@@ -37,6 +37,23 @@
         "Cargo.lock"
       ],
       "timeoutMinutes": 20
+    },
+    {
+      "name": "release-macos",
+      "command": "macos-release.sh sealkeep com.munhq.sealkeep dist/macos && ls -la dist/macos && sha256sum dist/macos/*",
+      "paths": [
+        "Cargo.toml",
+        ".desk/config.json"
+      ],
+      "stage": "main",
+      "timeoutMinutes": 120,
+      "secrets": {
+        "APPLE_P12": "apple_p12",
+        "APPLE_P12_PASSWORD": "apple_p12_password",
+        "ASC_KEY_P8": "asc_key_p8",
+        "ASC_KEY_ID": "asc_key_id",
+        "ASC_ISSUER_ID": "asc_issuer_id"
+      }
     }
   ]
 }
