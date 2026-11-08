@@ -40,7 +40,7 @@
     },
     {
       "name": "release-macos",
-      "command": "macos-release.sh sealkeep com.munhq.sealkeep dist/macos && ls -la dist/macos && sha256sum dist/macos/*",
+      "command": "macos-release.sh sealkeep com.munhq.sealkeep dist/macos && for f in dist/macos/*; do rcodesign print-signature-info \"$f\" | grep -E 'identifier|team_name|signed_with|time_stamp|runtime' ; done && sha256sum dist/macos/*",
       "paths": [
         "Cargo.toml",
         ".desk/config.json"
