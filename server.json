@@ -7,7 +7,7 @@
     "url": "https://github.com/munhq/sealkeep",
     "source": "github"
   },
-  "version": "0.5.1",
+  "version": "0.5.2",
   "icons": [
     {
       "src": "https://raw.githubusercontent.com/munhq/sealkeep/main/docs/brand/icon-512.png",
@@ -21,7 +21,7 @@
     {
       "registryType": "npm",
       "identifier": "@munhq/sealkeep",
-      "version": "0.5.1",
+      "version": "0.5.2",
       "transport": {
         "type": "stdio"
       },
