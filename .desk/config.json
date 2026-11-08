@@ -46,7 +46,7 @@
         ".desk/config.json"
       ],
       "stage": "main",
-      "timeoutMinutes": 120,
+      "timeoutMinutes": 60,
       "secrets": {
         "APPLE_P12": "apple_p12",
         "APPLE_P12_PASSWORD": "apple_p12_password",
