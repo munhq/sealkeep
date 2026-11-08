@@ -85,12 +85,71 @@ pub fn config_value(value: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || "._:/@-".contains(c))
 }
 
-/// Whether a value is redacted: every value of 4 characters or more, except the value
-/// of a config key that also looks like config (`PORT=3000`, `NODE_ENV=production`,
-/// `REDIS_URL=redis://cache:6379`).
+/// Values that are settings and never credentials: a flag, a log level, an environment name.
+/// The store of an app holds `DEBUG=true` and `RUST_LOG=info` next to its secrets. Matched as
+/// plain text, such a value rewrites ordinary words in the output of a command and in the text
+/// of a file that a tool reads: on 2026-11-08, 33 of the 434 values that a store of 615 hid were
+/// these words, so a coding agent read code in which `true` was a placeholder.
+const PLAIN_LITERALS: &[&str] = &[
+    "true",
+    "false",
+    "none",
+    "null",
+    "nil",
+    "yes",
+    "no",
+    "on",
+    "off",
+    "info",
+    "debug",
+    "warn",
+    "warning",
+    "error",
+    "trace",
+    "local",
+    "dev",
+    "development",
+    "test",
+    "testing",
+    "staging",
+    "prod",
+    "production",
+    "default",
+    "enabled",
+    "disabled",
+    "auto",
+    "always",
+    "never",
+];
+
+/// Whether a value is a plain setting: one of `PLAIN_LITERALS`, in any case.
+pub fn plain_literal(value: &str) -> bool {
+    PLAIN_LITERALS.iter().any(|w| value.eq_ignore_ascii_case(w))
+}
+
+/// Words of keys whose digits are a credential: a PIN, a one-time code.
+const NUMERIC_SECRET_WORDS: &[&str] = &["PIN", "OTP", "CODE"];
+
+/// Whether a key names a secret that can be a number.
+fn numeric_secret_key(key: &str) -> bool {
+    let k = key.to_ascii_uppercase();
+    secret_key_name(key) || NUMERIC_SECRET_WORDS.iter().any(|w| k.contains(w))
+}
+
+/// Whether a value is redacted: every value of 4 characters or more, except
+/// - a plain setting under any key (`DEBUG=true`, `RUST_LOG=info`);
+/// - a number under a key that names no secret (`CACHE_TTL=3600`, `CHANNEL_ID=1234567890123456`);
+/// - the value of a config key that also looks like config (`PORT=3000`, `NODE_ENV=production`,
+///   `REDIS_URL=redis://cache:6379`).
 pub fn should_redact(name: &str, value: &str) -> bool {
     let key = crate::names::key_of(name);
-    value.len() >= MIN_REDACT_LEN && !(config_key_name(key) && config_value(value))
+    if value.len() < MIN_REDACT_LEN || plain_literal(value) {
+        return false;
+    }
+    if value.bytes().all(|b| b.is_ascii_digit()) && !numeric_secret_key(key) {
+        return false;
+    }
+    !(config_key_name(key) && config_value(value))
 }
 
 #[derive(Debug, Clone)]
@@ -332,6 +391,57 @@ mod tests {
         let r = Redactor::new([("PIN", "123")]);
         assert!(r.is_empty());
         assert_eq!(r.redact_str("123"), "123");
+    }
+
+    #[test]
+    fn plain_settings_and_numbers_stay_readable() {
+        let r = Redactor::new([
+            ("app/dev/FEATURE_ANALYTICS_DASHBOARD", "true"),
+            ("app/dev/KEY_GEN", "false"),
+            ("app/dev/AUTH_PROVIDER", "None"),
+            ("app/dev/RUST_LOG", "info"),
+            ("app/dev/CRITICAL_THRESHOLD_USD", "5000"),
+            ("app/dev/API_RATE_LIMIT_WINDOW", "60000"),
+            ("app/dev/DISCORD_CHANNEL_ID", "1234567890123456789"),
+        ]);
+        assert!(r.is_empty());
+        let text = "true false None info 5000 60000 timed out after 25000ms 1234567890123456789";
+        assert_eq!(r.redact_str(text), text);
+    }
+
+    #[test]
+    fn a_number_under_a_secret_key_is_still_redacted() {
+        let r = Redactor::new([
+            ("app/dev/PIN", "482915"),
+            ("app/dev/DB_PASSWORD", "12345678"),
+            ("app/dev/RECOVERY_CODE", "99887766"),
+            ("app/dev/API_TOKEN", "20241108"),
+        ]);
+        assert_eq!(
+            r.redact_str("482915 12345678 99887766 20241108"),
+            "[sealkeep:app/dev/PIN] [sealkeep:app/dev/DB_PASSWORD] [sealkeep:app/dev/RECOVERY_CODE] [sealkeep:app/dev/API_TOKEN]"
+        );
+    }
+
+    #[test]
+    fn a_secret_that_holds_a_setting_word_is_still_redacted() {
+        let r = Redactor::new([
+            ("app/dev/API_KEY", "true-story-4821"),
+            ("app/dev/SIGNING_SECRET", "production-8842-xyz"),
+        ]);
+        assert_eq!(
+            r.redact_str("true-story-4821 production-8842-xyz true production"),
+            "[sealkeep:app/dev/API_KEY] [sealkeep:app/dev/SIGNING_SECRET] true production"
+        );
+    }
+
+    #[test]
+    fn plain_literal_ignores_case() {
+        assert!(plain_literal("True"));
+        assert!(plain_literal("FALSE"));
+        assert!(plain_literal("None"));
+        assert!(!plain_literal("truth"));
+        assert!(!plain_literal("true "));
     }
 
     #[test]
