@@ -8,6 +8,18 @@
   },
   "validation": [
     {
+      "name": "format",
+      "command": "cargo fmt --check",
+      "stage": "land",
+      "paths": [
+        "**/*.rs",
+        "Cargo.toml",
+        "Cargo.lock",
+        "rustfmt.toml",
+        ".rustfmt.toml"
+      ]
+    },
+    {
       "name": "fmt",
       "command": "cargo fmt --check",
       "paths": [
