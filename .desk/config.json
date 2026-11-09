@@ -52,13 +52,16 @@
     },
     {
       "name": "release-macos",
-      "command": "macos-release.sh sealkeep com.munhq.sealkeep dist/macos && for f in dist/macos/*; do rcodesign print-signature-info \"$f\" | grep -E 'identifier|team_name|signed_with|time_stamp|runtime' ; done && (cd dist/macos && sha256sum sealkeep-darwin-* > SHA256SUMS && cat SHA256SUMS)",
+      "command": "macos-release.sh sealkeep com.munhq.sealkeep dist/macos && for f in dist/macos/*; do rcodesign print-signature-info \"$f\" | grep -E 'identifier|team_name|signed_with|time_stamp|runtime' ; done && (cd dist/macos && sha256sum sealkeep-darwin-* > SHA256SUMS-macos && cat SHA256SUMS-macos)",
       "paths": [
         "Cargo.toml",
         ".desk/config.json"
       ],
       "stage": "main",
       "timeoutMinutes": 60,
+      "artifacts": [
+        "dist/macos/*"
+      ],
       "secrets": {
         "APPLE_P12": "apple_p12",
         "APPLE_P12_PASSWORD": "apple_p12_password",
@@ -66,6 +69,27 @@
         "ASC_KEY_ID": "asc_key_id",
         "ASC_ISSUER_ID": "asc_issuer_id"
       }
+    },
+    {
+      "name": "release-linux-windows",
+      "command": "release-build.sh sealkeep dist/release",
+      "paths": [
+        "Cargo.toml",
+        ".desk/config.json"
+      ],
+      "stage": "main",
+      "timeoutMinutes": 60,
+      "artifacts": [
+        "dist/release/*"
+      ],
+      "secrets": {
+        "COSIGN_KEY": "cosign_key",
+        "COSIGN_PASSWORD": "cosign_password"
+      }
     }
-  ]
+  ],
+  "release": {
+    "versionFile": "Cargo.toml",
+    "tagPrefix": "v"
+  }
 }
