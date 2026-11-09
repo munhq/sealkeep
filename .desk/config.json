@@ -91,5 +91,9 @@
   "release": {
     "versionFile": "Cargo.toml",
     "tagPrefix": "v"
-  }
+  },
+  "preLand": [
+    "cargo fmt --check",
+    "cargo clippy --all-targets -- -D warnings"
+  ]
 }
