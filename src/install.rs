@@ -341,6 +341,189 @@ fn shell_quote(s: &str) -> String {
     }
 }
 
+// ── the machine host ─────────────────────────────────────────────────────────
+//
+// One host on the loopback address serves each local server once for the machine,
+// and each client holds one URL in the place of a stdio command. The host of the
+// kit `@munhq/mcp-kit` reads its servers from `~/.config/mcp-kit/host.json`, and
+// this install writes the entry of sealkeep into it.
+
+/// The port of the machine host, and the name of this server in its list.
+const HOST_PORT: u16 = 7717;
+const SERVER: &str = "sealkeep";
+
+/// The URL that serves this server on the machine host.
+fn host_url() -> String {
+    format!("http://127.0.0.1:{HOST_PORT}/{SERVER}")
+}
+
+/// The file that lists the servers of the machine host.
+fn host_config() -> Result<PathBuf> {
+    Ok(home()?.join(".config").join("mcp-kit").join("host.json"))
+}
+
+/// The unit of the machine host: a service of the user on Linux.
+fn host_unit() -> Result<PathBuf> {
+    Ok(home()?
+        .join(".config")
+        .join("systemd")
+        .join("user")
+        .join("mcp-kit-host.service"))
+}
+
+/// Does this machine have the machine host? A client gets the URL only when it does,
+/// so no client points at a server that no process serves.
+fn host_present() -> bool {
+    host_unit().map(|p| p.exists()).unwrap_or(false) || on_path("mcp-kit-host")
+}
+
+/// Run a program for its effect only, and report whether it exited with 0.
+fn quiet(prog: &str, args: &[&str]) -> bool {
+    Command::new(prog)
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Keep the machine file to the user: it lists the commands of the host.
+fn restrict(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        if let Some(dir) = path.parent() {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+/// Add this binary to the server list of the machine host, so the host starts one
+/// `sealkeep mcp` for every client. It also reports whether the file changed.
+fn register_with_host(ctx: &Ctx) -> Result<(String, bool)> {
+    let path = host_config()?;
+    let bin = ctx.bin.clone();
+    let changed = edit_json(ctx, &path, |v| {
+        let obj = v.as_object_mut().expect("checked");
+        obj.entry("port").or_insert_with(|| json!(HOST_PORT));
+        obj.entry("host").or_insert_with(|| json!("127.0.0.1"));
+        let list = obj
+            .entry("servers")
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .context("`servers` is not a list")?;
+        let entry = json!({"name": SERVER, "command": bin, "args": ["mcp"]});
+        match list
+            .iter_mut()
+            .find(|s| s.get("name").and_then(|n| n.as_str()) == Some(SERVER))
+        {
+            Some(slot) if *slot == entry => Ok(false),
+            Some(slot) => {
+                *slot = entry;
+                Ok(true)
+            }
+            None => {
+                list.push(entry);
+                Ok(true)
+            }
+        }
+    })?;
+    if changed && !ctx.dry_run {
+        restrict(&path)?;
+    }
+    Ok(match (ctx.dry_run, changed) {
+        (false, true) => (format!("added the server to {}", path.display()), true),
+        (true, true) => (format!("would add the server to {}", path.display()), true),
+        _ => ("the server is already in the machine host".into(), false),
+    })
+}
+
+/// Remove this server from the list of the machine host, so the host starts no
+/// process for it.
+fn unregister_with_host(ctx: &Ctx) -> Result<String> {
+    let path = host_config()?;
+    let changed = edit_json(ctx, &path, |v| {
+        let Some(list) = v.get_mut("servers").and_then(|s| s.as_array_mut()) else {
+            return Ok(false);
+        };
+        let before = list.len();
+        list.retain(|s| s.get("name").and_then(|n| n.as_str()) != Some(SERVER));
+        Ok(list.len() != before)
+    })?;
+    if changed && !ctx.dry_run {
+        restart_host();
+    }
+    Ok(match (ctx.dry_run, changed) {
+        (false, true) => format!("removed the server from {}", path.display()),
+        (true, true) => format!("would remove the server from {}", path.display()),
+        _ => "the server is not in the machine host".into(),
+    })
+}
+
+/// Restart a host that runs, so it reads the server list again.
+fn restart_host() {
+    if quiet(
+        "systemctl",
+        &["--user", "is-active", "mcp-kit-host.service"],
+    ) {
+        let _ = quiet("systemctl", &["--user", "restart", "mcp-kit-host.service"]);
+    }
+}
+
+/// One line that says the state of the machine host, and of this server in its list.
+fn host_line() -> Result<String> {
+    if !host_present() {
+        return Ok(format!(
+            "Machine host: missing, so each client starts its own copy; run `mcp-kit-host install`, then `sealkeep install`, to serve it at {}",
+            host_url()
+        ));
+    }
+    let listed = read_json(&host_config()?)
+        .map(|v| v.to_string().contains(&format!("\"{SERVER}\"")))
+        .unwrap_or(false);
+    Ok(if listed {
+        format!("Machine host: {SERVER} is listed at {}", host_url())
+    } else {
+        format!(
+            "Machine host: {SERVER} is not listed; run `sealkeep install` to serve it at {}",
+            host_url()
+        )
+    })
+}
+
+/// Give the machine host the new list, and say where the clients find the server.
+/// A restart is needed only when the list changed, because it ends every session.
+fn run_host(ctx: &Ctx, changed: bool) -> Result<String> {
+    if host_unit()?.exists() {
+        if !ctx.dry_run {
+            let _ = quiet("systemctl", &["--user", "daemon-reload"]);
+            let _ = quiet(
+                "systemctl",
+                &["--user", "enable", "--now", "mcp-kit-host.service"],
+            );
+            if changed {
+                restart_host();
+            }
+        }
+        return Ok(format!("the machine host serves it at {}", host_url()));
+    }
+    if on_path("mcp-kit-host") {
+        if changed && !ctx.dry_run {
+            let _ = quiet("mcp-kit-host", &["install"]);
+        }
+        return Ok(format!("the machine host serves it at {}", host_url()));
+    }
+    Ok(format!(
+        "the machine host is not installed, so a client keeps the stdio command; run `mcp-kit-host install`, then `sealkeep install`, to serve it at {}",
+        host_url()
+    ))
+}
+
 /// Claude Code and Codex: a PreToolUse group with a matcher.
 fn add_pretool_hook(ctx: &Ctx, path: &Path, matcher: &str, client: &str) -> Result<String> {
     let cmd = guard_command(ctx, client);
@@ -484,30 +667,63 @@ fn claude_mcp(ctx: &Ctx, dir: &Path, add: bool) -> Result<String> {
     } else {
         base.env("CLAUDE_CONFIG_DIR", dir);
     }
-    let exists = {
+    let url = if host_present() {
+        Some(host_url())
+    } else {
+        None
+    };
+    let listed = {
         let mut c = clone_cmd(&base);
         c.args(["mcp", "get", "sealkeep"]);
-        c.output().map(|o| o.status.success()).unwrap_or(false)
+        c.output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+    };
+    // An entry of an older install is a stdio command, and it is not this entry.
+    let exists = match (&url, &listed) {
+        (Some(url), Some(text)) => text.contains(url.as_str()),
+        (None, Some(_)) => true,
+        _ => false,
     };
     if add && exists {
         return Ok("the MCP server is already registered".into());
     }
-    if !add && !exists {
+    if !add && listed.is_none() {
         return Ok("no MCP server to remove".into());
     }
     if ctx.dry_run {
-        return Ok(if add {
-            "would register the MCP server"
-        } else {
-            "would remove the MCP server"
-        }
-        .into());
+        return Ok(match (add, &url) {
+            (true, Some(url)) => format!("would register the MCP server at {url}"),
+            (true, None) => "would register the MCP server".into(),
+            (false, _) => "would remove the MCP server".into(),
+        });
     }
     let mut c = clone_cmd(&base);
     if add {
-        c.args([
-            "mcp", "add", "--scope", "user", "sealkeep", "--", &ctx.bin, "mcp",
-        ]);
+        match &url {
+            Some(url) => {
+                // The name is taken by the stdio entry, so the old one goes first.
+                let mut old = clone_cmd(&base);
+                old.args(["mcp", "remove", "--scope", "user", "sealkeep"]);
+                let _ = old.output();
+                c.args([
+                    "mcp",
+                    "add",
+                    "--scope",
+                    "user",
+                    "--transport",
+                    "http",
+                    "sealkeep",
+                    url,
+                ]);
+            }
+            None => {
+                c.args([
+                    "mcp", "add", "--scope", "user", "sealkeep", "--", &ctx.bin, "mcp",
+                ]);
+            }
+        }
     } else {
         c.args(["mcp", "remove", "--scope", "user", "sealkeep"]);
     }
@@ -518,12 +734,11 @@ fn claude_mcp(ctx: &Ctx, dir: &Path, add: bool) -> Result<String> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    Ok(if add {
-        "registered the MCP server"
-    } else {
-        "removed the MCP server"
-    }
-    .into())
+    Ok(match (add, &url) {
+        (true, Some(url)) => format!("registered the MCP server at {url}"),
+        (true, None) => "registered the MCP server".into(),
+        (false, _) => "removed the MCP server".into(),
+    })
 }
 
 fn clone_cmd(c: &Command) -> Command {
@@ -544,26 +759,45 @@ fn codex_mcp(ctx: &Ctx, add: bool) -> Result<String> {
         return Ok("the `codex` CLI is not on PATH, so the MCP server is not registered".into());
     }
     let cfg = std::fs::read_to_string(codex_home()?.join("config.toml")).unwrap_or_default();
-    let exists = cfg.contains("[mcp_servers.sealkeep]");
-    if add == exists {
-        return Ok(if add {
-            "the MCP server is already registered"
-        } else {
-            "no MCP server to remove"
-        }
-        .into());
+    let listed = cfg.contains("[mcp_servers.sealkeep]");
+    let url = if host_present() {
+        Some(host_url())
+    } else {
+        None
+    };
+    // An entry of an older install is a stdio command, and it is not this entry.
+    let exists = match (&url, add) {
+        (_, false) => listed,
+        (Some(url), true) => cfg.contains(url.as_str()),
+        (None, true) => listed,
+    };
+    if add && exists {
+        return Ok("the MCP server is already registered".into());
+    }
+    if !add && !exists {
+        return Ok("no MCP server to remove".into());
     }
     if ctx.dry_run {
-        return Ok(if add {
-            "would register the MCP server"
-        } else {
-            "would remove the MCP server"
-        }
-        .into());
+        return Ok(match (add, &url) {
+            (true, Some(url)) => format!("would register the MCP server at {url}"),
+            (true, None) => "would register the MCP server".into(),
+            (false, _) => "would remove the MCP server".into(),
+        });
     }
     let mut c = Command::new("codex");
     if add {
-        c.args(["mcp", "add", "sealkeep", "--", &ctx.bin, "mcp"]);
+        match &url {
+            Some(url) => {
+                // The name is taken by the stdio entry, so the old one goes first.
+                let _ = Command::new("codex")
+                    .args(["mcp", "remove", "sealkeep"])
+                    .output();
+                c.args(["mcp", "add", "sealkeep", "--url", url]);
+            }
+            None => {
+                c.args(["mcp", "add", "sealkeep", "--", &ctx.bin, "mcp"]);
+            }
+        }
     } else {
         c.args(["mcp", "remove", "sealkeep"]);
     }
@@ -574,17 +808,21 @@ fn codex_mcp(ctx: &Ctx, add: bool) -> Result<String> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    Ok(if add {
-        "registered the MCP server"
-    } else {
-        "removed the MCP server"
-    }
-    .into())
+    Ok(match (add, &url) {
+        (true, Some(url)) => format!("registered the MCP server at {url}"),
+        (true, None) => "registered the MCP server".into(),
+        (false, _) => "removed the MCP server".into(),
+    })
 }
 
 fn cursor_mcp(ctx: &Ctx, add: bool) -> Result<String> {
     let path = home()?.join(".cursor").join("mcp.json");
     let bin = ctx.bin.clone();
+    let url = if host_present() {
+        Some(host_url())
+    } else {
+        None
+    };
     let changed = edit_json(ctx, &path, |v| {
         let servers = v
             .as_object_mut()
@@ -595,10 +833,14 @@ fn cursor_mcp(ctx: &Ctx, add: bool) -> Result<String> {
             .as_object_mut()
             .context("`mcpServers` is not an object")?;
         if add {
-            if servers.contains_key("sealkeep") {
+            let entry = match &url {
+                Some(url) => json!({"url": url}),
+                None => json!({"command": bin, "args": ["mcp"]}),
+            };
+            if servers.get("sealkeep") == Some(&entry) {
                 return Ok(false);
             }
-            servers.insert("sealkeep".into(), json!({"command": bin, "args": ["mcp"]}));
+            servers.insert("sealkeep".into(), entry);
             Ok(true)
         } else {
             Ok(servers.remove("sealkeep").is_some())
@@ -670,6 +912,20 @@ pub fn apply(ctx: &Ctx, clients: &[ClientId], add: bool) -> Result<Vec<String>> 
         Ok(s) => lines.push(format!("{label}: {s}")),
         Err(e) => lines.push(format!("{label}: ERROR {e:#}")),
     };
+    // The machine host starts this server once for every client, and it reads its
+    // server list from the machine file.
+    if ctx.parts.mcp {
+        let outcome = if add {
+            register_with_host(ctx)
+        } else {
+            unregister_with_host(ctx).map(|line| (line, false))
+        };
+        let changed = matches!(&outcome, Ok((_, true)));
+        push("machine host".into(), outcome.map(|(line, _)| line));
+        if add {
+            push("machine host".into(), run_host(ctx, changed));
+        }
+    }
     let mut skill_dirs_done = HashSet::new();
     for c in clients {
         match c {
@@ -796,6 +1052,7 @@ pub fn apply(ctx: &Ctx, clients: &[ClientId], add: bool) -> Result<Vec<String>> 
 /// One line for each client for `doctor`.
 pub fn status() -> Result<Vec<String>> {
     let mut lines = Vec::new();
+    lines.push(host_line()?);
     for dir in claude_dirs()? {
         let skill = dir.join("skills/sealkeep/SKILL.md");
         let skill = match std::fs::read_to_string(&skill) {
@@ -852,6 +1109,11 @@ pub fn status() -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_host_url_is_one_loopback_address() {
+        assert_eq!(host_url(), "http://127.0.0.1:7717/sealkeep");
+    }
 
     fn ctx() -> Ctx {
         Ctx {
