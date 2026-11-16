@@ -1,0 +1,7 @@
+{
+  "name": "sealkeep",
+  "build_sha_env": "SEALKEEP_BUILD_SHA",
+  "issue": "munhq/desk#244",
+  "features": "test-store",
+  "check_filegroup": true
+}

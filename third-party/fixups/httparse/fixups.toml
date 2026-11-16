@@ -1,0 +1,6 @@
+cargo_env = true
+
+[buildscript.run]
+rustc_link_lib = true
+rustc_link_search = true
+env = { OPT_LEVEL = "0", DEBUG = "false", PROFILE = "debug" }

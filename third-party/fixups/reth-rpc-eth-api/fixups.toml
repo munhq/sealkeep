@@ -1,0 +1,6 @@
+cargo_env = true
+
+# The crate is in a git workspace: reindeer sets CARGO_MANIFEST_DIR to the root of the checkout, and proc-macro-crate
+# reads the dependencies of the crate there.
+[env]
+CARGO_MANIFEST_DIR = "reth-43b2f214c6b48f84/crates/rpc/rpc-eth-api"

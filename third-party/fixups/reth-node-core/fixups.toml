@@ -1,0 +1,8 @@
+cargo_env = true
+
+# The build script reads the commit through vergen-git2, and a Buck2 build has no .git folder. VERGEN_IDEMPOTENT makes vergen
+# write a fixed placeholder for each git value, so the output of the action is the same on every worker and stays a cache hit.
+[buildscript.run]
+rustc_link_lib = true
+rustc_link_search = true
+env = { OPT_LEVEL = "0", DEBUG = "false", PROFILE = "debug", VERGEN_IDEMPOTENT = "1" }

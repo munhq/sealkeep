@@ -1,0 +1,4 @@
+# The build script of aws-lc-rs only re-exports the DEP_AWS_LC_* variables of aws-lc-sys for crates that read them. It sets no cfg
+# without the feature dev-tests-only, and Buck2 does not pass the DEP_* variables of a dependency to a build script.
+[buildscript]
+run = false

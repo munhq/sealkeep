@@ -1304,7 +1304,11 @@ struct Fake {
 fn fake_vendors(env: &Env) -> Fake {
     let bin = env.path("fakebin");
     std::fs::create_dir_all(&bin).unwrap();
-    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fakes/fakecli.py");
+    // The manifest folder is read at run time: cargo and the runner of Buck2 both set it to an absolute path, and the symlinks below
+    // are read from another folder.
+    let manifest = std::env::var("CARGO_MANIFEST_DIR")
+        .expect("the runner of the test sets CARGO_MANIFEST_DIR");
+    let script = std::path::Path::new(&manifest).join("tests/fakes/fakecli.py");
     for name in ["aws", "gcloud", "az", "op", "bw"] {
         std::os::unix::fs::symlink(&script, bin.join(name)).unwrap();
     }

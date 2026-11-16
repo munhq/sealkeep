@@ -8,47 +8,21 @@
   },
   "validation": [
     {
+      "name": "root",
+      "command": "sh .desk/workflows/buck-base/scripts/buck-run.sh build //:check //:test-runs",
+      "timeoutMinutes": 30
+    },
+    {
+      "name": "lint",
+      "command": "sh .desk/workflows/buck-rust/scripts/clippy.sh",
+      "stage": "main",
+      "timeoutMinutes": 20
+    },
+    {
       "name": "format",
-      "command": "cargo fmt --check",
+      "command": "sh .desk/workflows/buck-rust/scripts/fmt.sh",
       "stage": "land",
-      "paths": [
-        "**/*.rs",
-        "Cargo.toml",
-        "Cargo.lock",
-        "rustfmt.toml",
-        ".rustfmt.toml"
-      ]
-    },
-    {
-      "name": "fmt",
-      "command": "cargo fmt --check",
-      "paths": [
-        "src/**",
-        "tests/**"
-      ],
       "timeoutMinutes": 10
-    },
-    {
-      "name": "clippy",
-      "command": "cargo clippy --locked --all-targets --features test-store -- -D warnings",
-      "paths": [
-        "src/**",
-        "tests/**",
-        "Cargo.toml",
-        "Cargo.lock"
-      ],
-      "timeoutMinutes": 20
-    },
-    {
-      "name": "test",
-      "command": "cargo test --locked --features test-store",
-      "paths": [
-        "src/**",
-        "tests/**",
-        "Cargo.toml",
-        "Cargo.lock"
-      ],
-      "timeoutMinutes": 20
     },
     {
       "name": "release-macos",
@@ -92,8 +66,19 @@
     "versionFile": "Cargo.toml",
     "tagPrefix": "v"
   },
-  "preLand": [
-    "cargo fmt --check",
-    "cargo clippy --all-targets -- -D warnings"
+  "preLand": [],
+  "checkouts": [
+    {
+      "repo": "munhq/desk",
+      "path": ".desk/workflows/buck-base",
+      "at": 613,
+      "subpath": "workflows/buck-base"
+    },
+    {
+      "repo": "munhq/desk",
+      "path": ".desk/workflows/buck-rust",
+      "at": 613,
+      "subpath": "workflows/buck-rust"
+    }
   ]
 }
