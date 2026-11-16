@@ -136,9 +136,25 @@ fn numeric_secret_key(key: &str) -> bool {
     secret_key_name(key) || NUMERIC_SECRET_WORDS.iter().any(|w| k.contains(w))
 }
 
+/// Whether a value is a plain number: digits with an optional sign and at most one
+/// decimal point (`3600`, `0.05`, `-1.5`).
+fn plain_number(value: &str) -> bool {
+    let digits = value.strip_prefix(['-', '+']).unwrap_or(value);
+    let mut parts = digits.splitn(2, '.');
+    let whole = parts.next().unwrap_or("");
+    let frac = parts.next();
+    let all_digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    match frac {
+        None => !whole.is_empty() && all_digits(whole),
+        Some(f) => !(whole.is_empty() && f.is_empty()) && all_digits(whole) && all_digits(f),
+    }
+}
+
 /// Whether a value is redacted: every value of 4 characters or more, except
 /// - a plain setting under any key (`DEBUG=true`, `RUST_LOG=info`);
-/// - a number under a key that names no secret (`CACHE_TTL=3600`, `CHANNEL_ID=1234567890123456`);
+/// - a number under a key that names no secret (`CACHE_TTL=3600`, `CHANNEL_ID=1234567890123456`,
+///   `MAX_PORTFOLIO_RISK=0.05`). A decimal value under a risk limit replaced the digits of
+///   every timestamp that held them in the output of a tool (2026-11-16);
 /// - the value of a config key that also looks like config (`PORT=3000`, `NODE_ENV=production`,
 ///   `REDIS_URL=redis://cache:6379`).
 pub fn should_redact(name: &str, value: &str) -> bool {
@@ -146,7 +162,7 @@ pub fn should_redact(name: &str, value: &str) -> bool {
     if value.len() < MIN_REDACT_LEN || plain_literal(value) {
         return false;
     }
-    if value.bytes().all(|b| b.is_ascii_digit()) && !numeric_secret_key(key) {
+    if plain_number(value) && !numeric_secret_key(key) {
         return false;
     }
     !(config_key_name(key) && config_value(value))
@@ -403,9 +419,11 @@ mod tests {
             ("app/dev/CRITICAL_THRESHOLD_USD", "5000"),
             ("app/dev/API_RATE_LIMIT_WINDOW", "60000"),
             ("app/dev/DISCORD_CHANNEL_ID", "1234567890123456789"),
+            ("app/dev/MAX_PORTFOLIO_RISK", "0.05"),
+            ("app/dev/STOP_LOSS_PCT", "-1.25"),
         ]);
         assert!(r.is_empty());
-        let text = "true false None info 5000 60000 timed out after 25000ms 1234567890123456789";
+        let text = "true false None info 5000 60000 timed out after 25000ms 1234567890123456789 time=1794844540.052765 -1.25";
         assert_eq!(r.redact_str(text), text);
     }
 
@@ -416,11 +434,24 @@ mod tests {
             ("app/dev/DB_PASSWORD", "12345678"),
             ("app/dev/RECOVERY_CODE", "99887766"),
             ("app/dev/API_TOKEN", "20241108"),
+            ("app/dev/SIGNING_SALT", "0.123456"),
         ]);
         assert_eq!(
-            r.redact_str("482915 12345678 99887766 20241108"),
-            "[sealkeep:app/dev/PIN] [sealkeep:app/dev/DB_PASSWORD] [sealkeep:app/dev/RECOVERY_CODE] [sealkeep:app/dev/API_TOKEN]"
+            r.redact_str("482915 12345678 99887766 20241108 0.123456"),
+            "[sealkeep:app/dev/PIN] [sealkeep:app/dev/DB_PASSWORD] [sealkeep:app/dev/RECOVERY_CODE] [sealkeep:app/dev/API_TOKEN] [sealkeep:app/dev/SIGNING_SALT]"
         );
+    }
+
+    #[test]
+    fn plain_number_accepts_only_numbers() {
+        for v in ["3600", "0.05", "-1.25", "+7", ".5", "5."] {
+            assert!(super::plain_number(v), "{v}");
+        }
+        for v in [
+            "", ".", "-", "1.2.3", "1e5", "0x1f", "12a4", "1,000", "v1.2",
+        ] {
+            assert!(!super::plain_number(v), "{v}");
+        }
     }
 
     #[test]

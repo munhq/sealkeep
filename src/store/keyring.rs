@@ -134,10 +134,44 @@ pub fn refresh() -> Result<()> {
     Ok(())
 }
 
+/// Whether an error says that the Secret Service does not know the session of this process.
+/// The platform store opens its session one time, and the session lives in
+/// gnome-keyring-daemon. A daemon that restarts drops every session, so a long-running
+/// process (the agent, `sealkeep mcp`) failed each keyring call after a restart with
+/// `org.freedesktop.Secret.Error.NoSession`: an agent that started on 2026-11-12 had not
+/// read the keyring for four days of daemon restarts (2026-11-16).
+fn session_lost(e: &anyhow::Error) -> bool {
+    format!("{e:#}").contains("org.freedesktop.Secret.Error.NoSession")
+}
+
+/// Make a new platform store, with a new Secret Service session, the default store.
+fn reconnect() -> Result<()> {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let store = zbus_secret_service_keyring_store::Store::new()
+            .context("open a new Secret Service session")?;
+        keyring_core::set_default_store(store);
+    }
+    Ok(())
+}
+
+/// `bounded`, and one more time with a new session when the daemon lost the session.
+fn bounded_session<T: Send + 'static>(
+    f: impl Fn() -> Result<T> + Clone + Send + 'static,
+) -> Result<T> {
+    match bounded(f.clone()) {
+        Err(e) if session_lost(&e) => {
+            reconnect()?;
+            bounded(f)
+        }
+        r => r,
+    }
+}
+
 /// Read one entry. `None` when it does not exist.
 pub fn read(service: &str, user: &str) -> Result<Option<String>> {
     let (service, user) = (service.to_string(), user.to_string());
-    bounded(move || {
+    bounded_session(move || {
         let entry = Entry::new(&service, &user)?;
         match entry.get_password() {
             Ok(v) => Ok(Some(v)),
@@ -149,7 +183,7 @@ pub fn read(service: &str, user: &str) -> Result<Option<String>> {
 
 pub fn write(service: &str, user: &str, value: &str) -> Result<()> {
     let (service, user, value) = (service.to_string(), user.to_string(), value.to_string());
-    bounded(move || {
+    bounded_session(move || {
         Entry::new(&service, &user)?
             .set_password(&value)
             .with_context(|| format!("write keyring entry {service}/{user}"))?;
@@ -160,7 +194,7 @@ pub fn write(service: &str, user: &str, value: &str) -> Result<()> {
 /// `true` when an entry was deleted.
 pub fn delete(service: &str, user: &str) -> Result<bool> {
     let (service, user) = (service.to_string(), user.to_string());
-    bounded(move || {
+    bounded_session(move || {
         let r = match Entry::new(&service, &user)?.delete_credential() {
             Ok(()) => true,
             Err(KeyringError::NoEntry) => false,
@@ -513,6 +547,17 @@ mod tests {
         let err = ensure_unlocked_state(Some(true)).unwrap_err();
         assert!(err.to_string().contains("keyring is locked"));
         assert!(err.to_string().contains("sealkeep unlock"));
+    }
+
+    #[test]
+    fn a_lost_session_is_recognised() {
+        let lost = anyhow::anyhow!(
+            "Platform failure: zbus error: org.freedesktop.Secret.Error.NoSession: The session does not exist"
+        )
+        .context("read keyring entry sealkeep/__index__");
+        assert!(super::session_lost(&lost));
+        let locked = anyhow::anyhow!("the keyring is locked (run `sealkeep unlock`)");
+        assert!(!super::session_lost(&locked));
     }
 
     #[test]
